@@ -1,0 +1,38 @@
+version: 2
+
+models:
+  - name: stg_nps__workplace_record
+    columns:
+      - name: base_ym
+        data_tests: [not_null]
+      - name: workplace_name
+        data_tests: [not_null]
+      - name: subscriber_count
+        data_tests: [not_null]
+      - name: join_status_code
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["1", "2"]
+      - name: workplace_type_code
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ["1", "2"]
+
+  - name: int_nps__selected_publication
+    columns:
+      - name: base_ym
+        data_tests: [unique, not_null]
+
+  - name: mart_workplace
+    columns:
+      - name: workplace_id
+        data_tests: [unique, not_null]
+
+  - name: mart_workplace_monthly
+    columns:
+      - name: workplace_id
+        data_tests: [not_null]
+      - name: contribution_rate
+        data_tests: [not_null]

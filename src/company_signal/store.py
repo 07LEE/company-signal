@@ -6,6 +6,7 @@ read the database while a collection is running.
 
 from __future__ import annotations
 
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -51,17 +52,33 @@ CREATE TABLE IF NOT EXISTS raw.nps_workplace_record (
 
 
 class Store:
-    def __init__(self, db_path: Path) -> None:
+    def __init__(self, db_path: Path, lock_wait: float = 600.0) -> None:
         self.db_path = db_path
+        self.lock_wait = lock_wait  # Seconds to wait for another process to release the file.
 
     @contextmanager
     def connect(self):
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        con = duckdb.connect(str(self.db_path))
+        con = self._open()
         try:
             yield con
         finally:
             con.close()
+
+    def _open(self) -> duckdb.DuckDBPyConnection:
+        """Open the database, waiting while another process holds the file.
+
+        DuckDB lets only one process open a file for writing. A dbt run or a
+        status check holds it for a while, and the collector must not die for that.
+        """
+        deadline = time.monotonic() + self.lock_wait
+        while True:
+            try:
+                return duckdb.connect(str(self.db_path))
+            except duckdb.IOException as exc:
+                if "lock" not in str(exc).lower() or time.monotonic() >= deadline:
+                    raise
+                time.sleep(1)
 
     def init(self) -> None:
         with self.connect() as con:

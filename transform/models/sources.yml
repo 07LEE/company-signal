@@ -1,0 +1,16 @@
+version: 2
+
+sources:
+  - name: collected_raw
+    description: Source records exactly as received from the API, one row per record.
+    database: collected
+    schema: raw
+    tables:
+      - name: nps_workplace_record
+
+  - name: collected_meta
+    description: Collection state kept by the collector.
+    database: collected
+    schema: meta
+    tables:
+      - name: publication

@@ -1,0 +1,60 @@
+name: company_signal
+version: "0.1.0"
+profile: company_signal
+
+model-paths: [models]
+seed-paths: [seeds]
+test-paths: [tests]
+macro-paths: [macros]
+target-path: target
+clean-targets: [target]
+
+# SQL functions shared by the models and the lookup CLI.
+on-run-start:
+  - "{{ create_functions() }}"
+
+models:
+  company_signal:
+    +materialized: table
+    staging:
+      +schema: staging
+    intermediate:
+      +schema: intermediate
+    marts:
+      +schema: mart
+
+seeds:
+  company_signal:
+    +schema: reference
+    nps_contribution_rate:
+      +column_types:
+        valid_from: date
+        rate: double
+
+vars:
+  # Canonical column -> source column names seen so far. Column names differ
+  # by publication period; add a name here when a new one appears. The test
+  # assert_no_unknown_source_columns fails on any name not listed.
+  nps_columns:
+    base_ym: ["자료생성년월"]
+    workplace_name: ["사업장명"]
+    biz_reg_no: ["사업자등록번호"]
+    join_status_code: ["사업장가입상태코드 1 등록 2 탈퇴"]
+    zip_code: ["우편번호"]
+    lot_address: ["사업장지번상세주소"]
+    road_address: ["사업장도로명상세주소"]
+    legal_dong_code: ["고객법정동주소코드"]
+    admin_dong_code: ["고객행정동주소코드"]
+    sido_code: ["법정동주소광역시도코드"]
+    sigungu_code: ["법정동주소광역시시군구코드"]
+    emd_code: ["법정동주소광역시시군구읍면동코드"]
+    workplace_type_code: ["사업장형태구분코드 1 법인 2 개인"]
+    industry_code: ["사업장업종코드"]
+    industry_name: ["사업장업종코드명"]
+    applied_on: ["적용일자"]
+    rejoined_on: ["재등록일자"]
+    withdrawn_on: ["탈퇴일자"]
+    subscriber_count: ["가입자수"]
+    billed_amount: ["당월고지금액"]
+    new_subscriber_count: ["신규취득자수"]
+    lost_subscriber_count: ["상실가입자수"]
