@@ -186,3 +186,370 @@ create or replace macro fsc_ties(workplace_table, item_table) as table
     from candidate
     group by workplace_id
     having count(*) = 1;
+
+-- The pension data. The dbt models run these over everything collected, and
+-- the lookup runs them over the rows it fetched for one workplace.
+
+-- nps_workplace_months: One row per workplace and base month.
+--
+-- The source has no workplace key, and only the first 6 digits of the business
+-- registration number are published. The key is built from those 6 digits, the
+-- normalized name and the date the workplace joined the pension scheme.
+--
+-- The address is deliberately not part of the key: about 2,400 workplaces a
+-- month move, and with the legal-dong code in the key each of them looked like
+-- one workplace closing and another opening. Source rows that share a key in
+-- the same month (about 0.02% of rows) are units the data cannot tell apart;
+-- they are summed and counted in source_row_count.
+--
+-- row_table has the rows of nps_record_rows plus published_on; selected_table
+-- has (publication_id, base_ym) of the publication chosen for each month.
+create or replace macro nps_workplace_months(row_table, selected_table) as table
+    with selected as (
+
+        select r.*
+        from query_table(row_table) as r
+        inner join query_table(selected_table) using (publication_id, base_ym)
+
+    ),
+
+    deduplicated as (
+
+        -- The source lists a few records twice, 0 to 3 a month, mostly construction
+        -- sites with no subscribers. They are not a paging artifact: the two copies
+        -- sit at fixed positions pages apart, and refetched pages are byte-identical.
+        select distinct * exclude (page, row_no)
+        from selected
+
+    ),
+
+    keyed as (
+
+        select
+            *,
+            normalize_name(workplace_name) as name_norm
+        from deduplicated
+
+    )
+
+    select
+        md5(concat_ws('|', biz_reg_no6, name_norm, coalesce(applied_on::varchar, ''))) as workplace_id,
+        base_ym,
+        arg_max(workplace_name, subscriber_count) as workplace_name,
+        name_norm,
+        biz_reg_no6,
+        applied_on,
+        arg_max(legal_dong_code, subscriber_count) as legal_dong_code,
+        min(join_status_code) as join_status_code,
+        arg_max(workplace_type_code, subscriber_count) as workplace_type_code,
+        arg_max(road_address, subscriber_count) as road_address,
+        arg_max(lot_address, subscriber_count) as lot_address,
+        arg_max(industry_code, subscriber_count) as industry_code,
+        arg_max(industry_name, subscriber_count) as industry_name,
+        max(withdrawn_on) as withdrawn_on,
+        sum(subscriber_count)::integer as subscriber_count,
+        sum(billed_amount)::bigint as billed_amount,
+        sum(new_subscriber_count)::integer as new_subscriber_count,
+        sum(lost_subscriber_count)::integer as lost_subscriber_count,
+        count(*)::integer as source_row_count
+    from keyed
+    group by base_ym, biz_reg_no6, name_norm, applied_on;
+
+-- nps_monthly: Monthly indicators per workplace.
+--
+-- Rates use the previous month's subscriber count, and only when the previous
+-- row really is the previous month. Estimated income divides the billed
+-- contribution by headcount and the contribution rate; contributions are capped
+-- by the income ceiling, so high-income workplaces are underestimated.
+--
+-- month_table has the rows of nps_workplace_months.
+create or replace macro nps_monthly(month_table) as table
+    with monthly as (
+
+        select
+            workplace_id,
+            base_ym,
+            subscriber_count,
+            billed_amount,
+            new_subscriber_count,
+            lost_subscriber_count,
+            source_row_count,
+            lag(base_ym) over by_workplace as previous_row_ym,
+            lag(subscriber_count) over by_workplace as previous_row_subscriber_count
+        from query_table(month_table)
+        window by_workplace as (partition by workplace_id order by base_ym)
+
+    ),
+
+    with_previous as (
+
+        select
+            * exclude (previous_row_ym, previous_row_subscriber_count),
+            case
+                when previous_row_ym = base_ym - interval 1 month then previous_row_subscriber_count
+            end as previous_subscriber_count
+        from monthly
+
+    )
+
+    select
+        m.workplace_id,
+        m.base_ym,
+        m.subscriber_count,
+        m.billed_amount,
+        m.new_subscriber_count,
+        m.lost_subscriber_count,
+        m.previous_subscriber_count,
+        m.new_subscriber_count / nullif(m.previous_subscriber_count, 0) as hire_rate,
+        m.lost_subscriber_count / nullif(m.previous_subscriber_count, 0) as attrition_rate,
+        nps_contribution_rate(m.base_ym) as contribution_rate,
+        round(m.billed_amount / nullif(m.subscriber_count, 0) / nps_contribution_rate(m.base_ym))::bigint as est_avg_monthly_income,
+        m.source_row_count
+    from with_previous as m;
+
+-- nps_workplaces: One row per workplace: its latest description, for search and selection,
+-- plus the 12-month attrition, which is only given with 12 full months of history.
+--
+-- month_table has the rows of nps_workplace_months, monthly_table those of
+-- nps_monthly. The latest data month is the latest month in month_table.
+create or replace macro nps_workplaces(month_table, monthly_table) as table
+    with latest as (
+
+        select *
+        from query_table(month_table)
+        qualify row_number() over (partition by workplace_id order by base_ym desc) = 1
+
+    ),
+
+    history as (
+
+        select
+            workplace_id,
+            min(base_ym) as first_base_ym,
+            count(*)::integer as months_observed
+        from query_table(monthly_table)
+        group by workplace_id
+
+    ),
+
+    last_12_months as (
+
+        select
+            m.workplace_id,
+            count(*) as month_count,
+            sum(m.lost_subscriber_count) as lost_subscriber_count,
+            avg(m.subscriber_count) as avg_subscriber_count
+        from query_table(monthly_table) as m
+        inner join latest as l using (workplace_id)
+        where m.base_ym > l.base_ym - interval 12 month
+        group by m.workplace_id
+
+    ),
+
+    data_bounds as (
+
+        select max(base_ym) as latest_data_ym from query_table(month_table)
+
+    )
+
+    select
+        l.workplace_id,
+        l.workplace_name,
+        l.name_norm,
+        l.biz_reg_no6,
+        l.road_address,
+        l.lot_address,
+        l.legal_dong_code,
+        l.industry_code,
+        l.industry_name,
+        l.workplace_type_code,
+        l.join_status_code,
+        l.applied_on,
+        l.withdrawn_on,
+        l.subscriber_count,
+        l.base_ym as latest_base_ym,
+        l.base_ym = b.latest_data_ym as in_latest_data,
+        h.first_base_ym,
+        h.months_observed,
+        case
+            when t.month_count = 12 and t.avg_subscriber_count > 0
+                then t.lost_subscriber_count / t.avg_subscriber_count
+        end as attrition_rate_12m
+    from latest as l
+    inner join history as h using (workplace_id)
+    left join last_12_months as t using (workplace_id)
+    cross join data_bounds as b;
+
+-- nps_years: One row per workplace and calendar year.
+--
+-- A year with fewer than 12 months of data is kept and flagged, not scaled up:
+-- nine months of leavers are not a yearly attrition. Rates divide by the
+-- average monthly headcount of the months that are present.
+--
+-- replacement_rate is the smaller of joiners and leavers over the headcount:
+-- the share of staff that was swapped for someone else. A growing workplace has
+-- many joiners and a low replacement rate; one that keeps losing and rehiring
+-- people has a high one at the same headcount.
+--
+-- monthly_table has the rows of nps_monthly.
+create or replace macro nps_years(monthly_table) as table
+    with yearly as (
+
+        select
+            workplace_id,
+            year(base_ym)::integer as base_year,
+            count(*)::integer as months_observed,
+            avg(subscriber_count) as avg_subscriber_count,
+            arg_min(subscriber_count, base_ym) as first_subscriber_count,
+            arg_max(subscriber_count, base_ym) as last_subscriber_count,
+            sum(new_subscriber_count)::integer as new_subscriber_total,
+            sum(lost_subscriber_count)::integer as lost_subscriber_total,
+            -- Total estimated income over total subscriber-months, so a month with
+            -- more people weighs more. fsum adds with error compensation: a plain sum of
+            -- doubles depends on the order rows arrive in, which moved some values by 1 won.
+            round(fsum(billed_amount / contribution_rate) / nullif(sum(subscriber_count), 0))::bigint
+                as est_avg_monthly_income
+        from query_table(monthly_table)
+        group by workplace_id, year(base_ym)
+
+    )
+
+    select
+        workplace_id,
+        base_year,
+        months_observed,
+        months_observed = 12 as is_full_year,
+        avg_subscriber_count,
+        first_subscriber_count,
+        last_subscriber_count,
+        new_subscriber_total,
+        lost_subscriber_total,
+        lost_subscriber_total / nullif(avg_subscriber_count, 0) as attrition_rate,
+        least(new_subscriber_total, lost_subscriber_total) / nullif(avg_subscriber_count, 0) as replacement_rate,
+        est_avg_monthly_income,
+        -- Change from the year before, only when the row before really is the year before.
+        case
+            when lag(base_year) over by_workplace = base_year - 1
+                then est_avg_monthly_income / nullif(lag(est_avg_monthly_income) over by_workplace, 0) - 1
+        end as income_change_rate
+    from yearly
+    window by_workplace as (partition by workplace_id order by base_year);
+
+-- nps_overall: One row per workplace: the whole collected period in a few numbers.
+--
+-- Attrition and replacement are given for three spans, each as a yearly rate:
+-- the whole period, the last 3 years and the last 12 months, counted back from
+-- the workplace's own latest month. A span is left empty unless every month of
+-- it is present: 12 months for the last year, 36 for the last three, and at
+-- least 12 for the whole period. Side by side they show whether the workplace
+-- has always been like this or changed recently.
+--
+-- implied_tenure_years is 1 / yearly attrition: how long people would stay on
+-- average if they kept leaving at that pace. It is not a measured tenure.
+--
+-- monthly_table has the rows of nps_monthly, workplace_table those of
+-- nps_workplaces.
+create or replace macro nps_overall(monthly_table, workplace_table) as table
+    with monthly as (
+
+        select * from query_table(monthly_table)
+
+    ),
+
+    totals as (
+
+        select
+            workplace_id,
+            min(base_ym) as first_base_ym,
+            max(base_ym) as last_base_ym,
+            count(*)::integer as months_observed,
+            arg_min(subscriber_count, base_ym) as first_subscriber_count,
+            arg_max(subscriber_count, base_ym) as last_subscriber_count,
+            avg(subscriber_count) as avg_subscriber_count,
+            sum(new_subscriber_count)::integer as new_subscriber_total,
+            sum(lost_subscriber_count)::integer as lost_subscriber_total,
+            arg_min(est_avg_monthly_income, base_ym) filter (where est_avg_monthly_income is not null)
+                as first_est_income,
+            min(base_ym) filter (where est_avg_monthly_income is not null) as first_est_income_ym,
+            arg_max(est_avg_monthly_income, base_ym) filter (where est_avg_monthly_income is not null)
+                as last_est_income,
+            max(base_ym) filter (where est_avg_monthly_income is not null) as last_est_income_ym
+        from monthly
+        group by workplace_id
+
+    ),
+
+    -- Sums over the last 12 and the last 36 months of each workplace.
+    recent as (
+
+        select
+            m.workplace_id,
+            count(*) filter (where m.base_ym > t.last_base_ym - interval 12 month) as months_12m,
+            sum(m.new_subscriber_count) filter (where m.base_ym > t.last_base_ym - interval 12 month) as new_12m,
+            sum(m.lost_subscriber_count) filter (where m.base_ym > t.last_base_ym - interval 12 month) as lost_12m,
+            avg(m.subscriber_count) filter (where m.base_ym > t.last_base_ym - interval 12 month) as avg_12m,
+            count(*) filter (where m.base_ym > t.last_base_ym - interval 36 month) as months_3y,
+            sum(m.new_subscriber_count) filter (where m.base_ym > t.last_base_ym - interval 36 month) as new_3y,
+            sum(m.lost_subscriber_count) filter (where m.base_ym > t.last_base_ym - interval 36 month) as lost_3y,
+            avg(m.subscriber_count) filter (where m.base_ym > t.last_base_ym - interval 36 month) as avg_3y
+        from monthly as m
+        inner join totals as t using (workplace_id)
+        group by m.workplace_id
+
+    ),
+
+    rates as (
+
+        select
+            t.*,
+            case
+                when t.months_observed >= 12
+                    then t.lost_subscriber_total * 12.0 / t.months_observed / nullif(t.avg_subscriber_count, 0)
+            end as attrition_rate_per_year,
+            case
+                when t.months_observed >= 12
+                    then least(t.new_subscriber_total, t.lost_subscriber_total) * 12.0
+                        / t.months_observed / nullif(t.avg_subscriber_count, 0)
+            end as replacement_rate_per_year,
+            case when c.months_3y = 36 then c.lost_3y / 3.0 / nullif(c.avg_3y, 0) end as attrition_rate_3y,
+            case when c.months_3y = 36 then least(c.new_3y, c.lost_3y) / 3.0 / nullif(c.avg_3y, 0) end
+                as replacement_rate_3y,
+            case when c.months_12m = 12 then c.lost_12m / nullif(c.avg_12m, 0) end as attrition_rate_12m,
+            case when c.months_12m = 12 then least(c.new_12m, c.lost_12m) / nullif(c.avg_12m, 0) end
+                as replacement_rate_12m,
+            datediff('month', t.first_est_income_ym, t.last_est_income_ym) as income_span_months
+        from totals as t
+        inner join recent as c using (workplace_id)
+
+    )
+
+    select
+        r.workplace_id,
+        r.first_base_ym,
+        r.last_base_ym,
+        r.months_observed,
+        r.first_subscriber_count,
+        r.last_subscriber_count,
+        r.avg_subscriber_count,
+        r.new_subscriber_total,
+        r.lost_subscriber_total,
+        r.attrition_rate_per_year,
+        r.attrition_rate_3y,
+        r.attrition_rate_12m,
+        r.replacement_rate_per_year,
+        r.replacement_rate_3y,
+        r.replacement_rate_12m,
+        1 / nullif(r.attrition_rate_per_year, 0) as implied_tenure_years,
+        1 / nullif(r.attrition_rate_3y, 0) as implied_tenure_years_3y,
+        1 / nullif(r.attrition_rate_12m, 0) as implied_tenure_years_12m,
+        r.first_est_income,
+        r.last_est_income,
+        -- Compound yearly growth between the first and the last month with an estimate.
+        case
+            when r.income_span_months >= 12 and r.first_est_income > 0
+                then power(r.last_est_income / r.first_est_income, 12.0 / r.income_span_months) - 1
+        end as income_growth_per_year,
+        -- Nobody can have been there longer than the workplace has been in the scheme.
+        datediff('month', w.applied_on, r.last_base_ym) / 12.0 as scheme_age_years
+    from rates as r
+    inner join query_table(workplace_table) as w using (workplace_id);
