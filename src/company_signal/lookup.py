@@ -161,6 +161,19 @@ def load_years(con: duckdb.DuckDBPyConnection, workplace_id: str) -> list[dict]:
     return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
 
+def load_company(con: duckdb.DuckDBPyConnection, workplace_id: str) -> dict | None:
+    """The corporation a workplace is tied to by its disclosures, or None.
+
+    None also when the warehouse was built before disclosures were collected.
+    """
+    try:
+        cursor = con.execute("select * from mart.mart_workplace_company where workplace_id = ?", [workplace_id])
+    except duckdb.CatalogException:
+        return None
+    row = cursor.fetchone()
+    return dict(zip([d[0] for d in cursor.description], row)) if row else None
+
+
 def load_overall(con: duckdb.DuckDBPyConnection, workplace_id: str) -> dict | None:
     """The whole-period row of one workplace. None if the warehouse has no such table yet."""
     try:
@@ -305,6 +318,35 @@ def format_overall(o: dict) -> str:
     return "\n".join(lines)
 
 
+def format_company(c: dict) -> str:
+    """What the corporation discloses about itself. Lines without a value are left out."""
+    lines = ["Company details  (reported by the company, for the whole company)", ""]
+
+    def row(label: str, value) -> None:
+        if value is not None and value != "":
+            lines.append(f"  {label:<17}{value}")
+
+    bzno = c["bzno"] or ""
+    row("company", c["corp_name"])
+    row("registration no.", f"{bzno[:3]}-{bzno[3:5]}-{bzno[5:]}" if len(bzno) == 10 else bzno)
+    row("established", c["established_on"])
+    row("industry", c["industry_name"])
+    row("main business", c["main_business"])
+    row("employees", f"{c['employee_count']:,}" if c["employee_count"] is not None else None)
+    row("avg tenure", f"{c['avg_tenure_years']:.1f} years" if c["avg_tenure_years"] is not None else None)
+    row("avg yearly pay", f"{c['avg_yearly_pay']:,} KRW" if c["avg_yearly_pay"] is not None else None)
+
+    lines.append("")
+    if c["figures_published_on"] is not None:
+        lines.append(f"  Figures as published on {c['figures_published_on']}, from the corporate outline of the")
+        lines.append("  Financial Services Commission. They cover the whole company, not only this workplace.")
+    else:
+        lines.append("  The company has disclosed no staff, tenure or pay figures in the corporate outline")
+        lines.append("  of the Financial Services Commission.")
+    lines.append("  Tied by the company name and the first 6 digits of the business registration number.")
+    return "\n".join(lines)
+
+
 def format_summary(workplace: dict, months: list[dict]) -> str:
     """Who the workplace is and its latest month. This part stays put while the history is paged."""
     latest = months[-1]
@@ -376,6 +418,7 @@ def browse(
     shown: list[dict],
     years: list[dict] | None = None,
     overall: dict | None = None,
+    company: dict | None = None,
     ask=input,
     in_place: bool | None = None,
     terminal_size=shutil.get_terminal_size,
@@ -384,10 +427,10 @@ def browse(
 
     In the monthly view `<` and `>` move the window by its own length toward
     older or newer months and `a` shows everything. `y` switches to the yearly
-    report and `s` to the whole-period summary, when the caller has them, and
-    `m` goes back to the months. `q`, Enter or end of input leaves. Nothing is
-    asked when there is nothing else to show: the whole history is on screen
-    and there is no other view.
+    report, `s` to the whole-period summary and `d` to the company's own
+    disclosures, when the caller has them, and `m` goes back to the months.
+    `q`, Enter or end of input leaves. Nothing is asked when there is nothing
+    else to show: the whole history is on screen and there is no other view.
 
     On a terminal the table is redrawn where it stands, so the summary above
     stays in view. That needs the cursor to move back up over what was drawn,
@@ -411,12 +454,16 @@ def browse(
         views["y"] = ("yearly", "yearly")
     if overall:
         views["s"] = ("summary", "summary")
+    if company:
+        views["d"] = ("company", "company")
 
     def block() -> str:
         if view == "yearly":
             return format_yearly(years)
         if view == "summary":
             return format_overall(overall)
+        if view == "company":
+            return format_company(company)
         return format_history(months, months[low:high])
 
     def other_views() -> list[tuple[str, str]]:

@@ -11,6 +11,7 @@ from company_signal.lookup import (
     display_width,
     fit,
     format_history,
+    format_company,
     format_hits,
     format_notes,
     format_overall,
@@ -491,3 +492,54 @@ def test_browse_reaches_every_view_and_names_the_others_in_the_prompt(capsys):
     assert prompts[2] == "[m] monthly  [s] summary  [q] quit: "
     assert "Summary  2021-01 to 2025-12" in out and "Yearly report" in out
     assert "Type m, s or q." in out  # paging keys do nothing outside the monthly view
+
+
+def company(**overrides):
+    base = {
+        "crno": "1101110000001",
+        "corp_name": "(주)한빛",
+        "bzno": "1238112345",
+        "established_on": date(2011, 3, 2),
+        "industry_name": "응용 소프트웨어 개발 및 공급업",
+        "main_business": None,
+        "employee_count": 642,
+        "avg_tenure_years": 5.48,
+        "avg_yearly_pay": 53_651_000,
+        "figures_published_on": date(2026, 11, 14),
+    }
+    return base | overrides
+
+
+def test_company_shows_what_was_disclosed_and_where_it_comes_from():
+    text = format_company(company())
+    assert text.splitlines()[0] == "Company details  (reported by the company, for the whole company)"
+    assert "  registration no. 123-81-12345" in text
+    assert "  employees        642" in text
+    assert "  avg tenure       5.5 years" in text
+    assert "  avg yearly pay   53,651,000 KRW" in text
+    assert "Figures as published on 2026-11-14" in text
+    assert "not only this workplace" in text
+    assert "main business" not in text  # not disclosed, so no line
+
+
+def test_company_without_figures_says_so():
+    text = format_company(company(employee_count=None, avg_tenure_years=None, avg_yearly_pay=None, figures_published_on=None))
+    assert "employees" not in text and "avg tenure" not in text
+    assert "has disclosed no staff, tenure or pay figures" in text
+
+
+def test_browse_offers_company_details_only_when_tied():
+    months = year_of_months()
+    seen = []
+
+    def ask(prompt):
+        seen.append(prompt)
+        return "d" if len(seen) == 1 else "q"
+
+    browse(months, pick_months(months, last=3), company=company(), ask=ask, in_place=False)
+    assert "[d] company" in seen[0]
+    assert seen[1] == "[m] monthly  [q] quit: "
+
+    seen.clear()
+    browse(months, pick_months(months, last=3), ask=lambda prompt: seen.append(prompt) or "q", in_place=False)
+    assert "[d]" not in seen[0]

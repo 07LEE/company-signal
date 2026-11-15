@@ -23,6 +23,7 @@ from .lookup import (
     format_notes,
     format_summary,
     load_detail,
+    load_company,
     load_overall,
     load_years,
     open_warehouse,
@@ -142,11 +143,12 @@ def cmd_search(args: argparse.Namespace) -> int:
             workplace, months = load_detail(con, selected.workplace_id)
             years = load_years(con, selected.workplace_id)
             overall = load_overall(con, selected.workplace_id)
+            company = load_company(con, selected.workplace_id)
         shown = pick_months(months, last=args.months, start=args.start, end=args.end)
         print()
         print(format_summary(workplace, months))
         print()
-        browse(months, shown, years, overall)
+        browse(months, shown, years, overall, company)
         print()
         print(format_notes(workplace, months))
     except WarehouseMissing as exc:
