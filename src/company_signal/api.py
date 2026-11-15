@@ -92,6 +92,19 @@ class Client:
         params = {"page": page, "perPage": PER_PAGE, "returnType": "JSON"}
         return self._get(url, params=params, expect_key="data")
 
+    def fetch_matching(self, publication_id: str, conditions: dict[tuple[str, str], str], page: int = 1) -> bytes:
+        """One page of the records of a publication that meet `conditions`, as received.
+
+        A condition is (source column name, operator) -> value, sent as
+        cond[name::OPERATOR]. LIKE matches names containing the value, ignoring
+        case; EQ matches exactly. The published spec does not list these
+        parameters, but the API accepts them (checked 2026-11-15).
+        """
+        url = f"{BASE_URL}/{DATASET}/v1/{publication_id}"
+        params = {"page": page, "perPage": PER_PAGE, "returnType": "JSON"}
+        params |= {f"cond[{column}::{operator}]": value for (column, operator), value in conditions.items()}
+        return self._get(url, params=params, expect_key="data")
+
     def _get(self, url: str, params: dict | None, expect_key: str) -> bytes:
         last_problem = ""
         for attempt in range(1, self._max_attempts + 1):

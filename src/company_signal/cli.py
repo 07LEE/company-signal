@@ -4,16 +4,17 @@ from __future__ import annotations
 
 import argparse
 import sys
-from contextlib import closing
+from contextlib import closing, nullcontext
 from datetime import date
 
 import duckdb
 
 from .api import Client, FetchError
 from .collect import collect
-from .config import Settings, load_settings
+from .config import KEY_ENV, Settings, load_settings
 from .disclosure import company_from_answer, company_loader, query_name_if_askable
 from .enrich import enrich
+from .live import search_live
 from .fsc import FscClient
 from .lookup import (
     DEFAULT_MONTHS,
@@ -135,6 +136,14 @@ def cmd_search(args: argparse.Namespace) -> int:
         return 2
     settings = load_settings(require_key=False)
     warehouse = settings.warehouse_path
+    if not warehouse.exists() and not settings.service_key:
+        print(
+            f"{warehouse} does not exist. Build it (dbt build --project-dir transform --profiles-dir transform),"
+            f" or put {KEY_ENV} in .env to search the pension API directly.",
+            file=sys.stderr,
+        )
+        return 1
+    live = None  # set when the search went to the API: an in-memory warehouse for this search
     try:
         name = args.name
         if name is None:
@@ -148,8 +157,24 @@ def cmd_search(args: argparse.Namespace) -> int:
         # The warehouse is open only while reading, never while waiting for a
         # key. A lookup left sitting at a prompt would otherwise keep the file
         # open and block the next dbt build from writing to it.
-        with closing(open_warehouse(warehouse)) as con:
-            hits, total = search(con, name, args.limit)
+        hits, total = [], 0
+        if warehouse.exists():
+            with closing(open_warehouse(warehouse)) as con:
+                hits, total = search(con, name, args.limit)
+        if not hits and settings.service_key:
+            client = Client(settings.service_key)
+            try:
+                live = search_live(client, name, announce=lambda: print("Not in the collected data; searching the pension API..."))
+            except FetchError as exc:
+                print(f"Could not search the pension API: {exc}", file=sys.stderr)
+                return 1
+            finally:
+                client.close()
+            if live is not None:
+                hits, total = search(live.con, name, args.limit)
+                print(f"Live lookup of {live.base_ym}, the latest month only. Nothing is stored.")
+                if live.truncated:
+                    print(f"The API found {live.match_count:,} workplaces; only the first {live.fetched:,} were read. Search with a longer name.")
         print(format_hits(hits, total, name))
         # Piped output gets the list only; a person at a terminal gets to pick one.
         if not sys.stdin.isatty():
@@ -158,12 +183,12 @@ def cmd_search(args: argparse.Namespace) -> int:
         if selected is None:
             return 0
 
-        with closing(open_warehouse(warehouse)) as con:
+        with nullcontext(live.con) if live else closing(open_warehouse(warehouse)) as con:
             workplace, months = load_detail(con, selected.workplace_id)
             years = load_years(con, selected.workplace_id)
             overall = load_overall(con, selected.workplace_id)
             company = load_company(con, selected.workplace_id)
-            query_name = None if company else query_name_if_askable(con, selected.workplace_id)
+            query_name = None if company or live else query_name_if_askable(con, selected.workplace_id)
         if query_name:
             company = company_for_untied(settings, selected.workplace_id, query_name)
         shown = pick_months(months, last=args.months, start=args.start, end=args.end)
@@ -173,6 +198,8 @@ def cmd_search(args: argparse.Namespace) -> int:
         browse(months, shown, years, overall, company)
         print()
         print(format_notes(workplace, months))
+        if live:
+            print(f"  - Fetched from the pension API for this search: {live.base_ym} only, so no rates yet.")
     except WarehouseMissing as exc:
         print(exc, file=sys.stderr)
         return 1
@@ -182,6 +209,9 @@ def cmd_search(args: argparse.Namespace) -> int:
     except (EOFError, KeyboardInterrupt):
         print()
         return 130
+    finally:
+        if live:
+            live.con.close()
     return 0
 
 
