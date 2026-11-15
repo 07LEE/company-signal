@@ -14,6 +14,7 @@ from company_signal.lookup import (
     format_hits,
     format_notes,
     format_summary,
+    format_yearly,
     pick_months,
     screen_rows,
     search,
@@ -335,3 +336,73 @@ def test_screen_rows_counts_wrapped_lines_and_wide_characters():
     assert screen_rows("a" * 81, 80) == 2
     assert screen_rows("한" * 41, 80) == 2  # 41 Korean characters are 82 columns
     assert screen_rows("", 80) == 1
+
+
+def year(base_year, months=12, staff=100.0, joined=20, left=10, income=3_000_000, change=None):
+    return {
+        "base_year": base_year,
+        "months_observed": months,
+        "is_full_year": months == 12,
+        "avg_subscriber_count": staff,
+        "first_subscriber_count": int(staff) - 5,
+        "last_subscriber_count": int(staff) + 5,
+        "new_subscriber_total": joined,
+        "lost_subscriber_total": left,
+        "attrition_rate": left / staff,
+        "replacement_rate": min(joined, left) / staff,
+        "est_avg_monthly_income": income,
+        "income_change_rate": change,
+    }
+
+
+def test_yearly_marks_years_with_missing_months():
+    text = format_yearly([year(2025, change=0.063), year(2026, months=9)])
+    full, partial = [line for line in text.splitlines() if line.startswith("  202")]
+    assert "10.0%" in full and "10.0%*" not in full and "+6.3%" in full
+    assert "10.0%*" in partial
+    assert "fewer than 12 months" in text
+
+
+def test_yearly_has_no_footnote_when_every_year_is_complete():
+    assert "fewer than 12 months" not in format_yearly([year(2024), year(2025)])
+
+
+def test_yearly_hides_rates_of_small_workplaces():
+    line = [l for l in format_yearly([year(2025, staff=4.0, joined=2, left=1)]).splitlines() if l.startswith("  2025")][0]
+    assert "%" not in line
+
+
+def test_browse_switches_between_monthly_and_yearly(capsys):
+    months = year_of_months()
+    browse(months, pick_months(months, last=3), [year(2026)], ask=answers("y", "<", "m", "<"), in_place=False)
+    out = capsys.readouterr().out
+    assert out.count("Yearly report") == 1
+    assert "Type m or q." in out  # paging keys do nothing in the yearly view
+    assert "Monthly history (2026-07 to 2026-09, 3 of 12 months)" in out  # paging works again after m
+
+
+def test_browse_offers_the_yearly_view_even_when_all_months_are_shown(capsys):
+    months = year_of_months()
+    prompts = []
+
+    def ask(prompt):
+        prompts.append(prompt)
+        return "y" if len(prompts) == 1 else "q"
+
+    browse(months, months, [year(2026)], ask=ask, in_place=False)
+    assert "[y] yearly" in prompts[0]
+    assert prompts[1] == "[m] monthly  [q] quit: "
+    assert "Yearly report" in capsys.readouterr().out
+
+
+def test_browse_without_yearly_data_does_not_offer_it(capsys):
+    months = year_of_months()
+    prompts = []
+
+    def ask(prompt):
+        prompts.append(prompt)
+        return "y" if len(prompts) == 1 else "q"
+
+    browse(months, pick_months(months, last=3), [], ask=ask, in_place=False)
+    assert "[y]" not in prompts[0]
+    assert "Type <, >, a or q." in capsys.readouterr().out

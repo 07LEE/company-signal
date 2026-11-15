@@ -149,6 +149,18 @@ def load_detail(con: duckdb.DuckDBPyConnection, workplace_id: str) -> tuple[dict
     return workplace[0], months
 
 
+def load_years(con: duckdb.DuckDBPyConnection, workplace_id: str) -> list[dict]:
+    """The yearly rows of one workplace, oldest first. Empty if the warehouse has no yearly table yet."""
+    try:
+        cursor = con.execute(
+            "select * from mart.mart_workplace_yearly where workplace_id = ? order by base_year", [workplace_id]
+        )
+    except duckdb.CatalogException:
+        return []
+    columns = [d[0] for d in cursor.description]
+    return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+
 def pick_months(
     months: list[dict],
     last: int | None = DEFAULT_MONTHS,
@@ -188,6 +200,41 @@ def format_history(months: list[dict], shown: list[dict]) -> str:
             f"{shown_rate(m['hire_rate'], previous) or '-':>9}{shown_rate(m['attrition_rate'], previous) or '-':>9}"
             f"{f'{income:,}' if income is not None else '-':>14}"
         )
+    return "\n".join(lines)
+
+
+def format_yearly(years: list[dict]) -> str:
+    """One line per calendar year. A year with fewer than 12 months of data is marked, not scaled up."""
+    lines = [
+        "Yearly report",
+        f"  {'year':<6}{'months':>6}{'avg staff':>11}{'start':>8}{'end':>8}{'joined':>8}{'left':>7}"
+        f"{'attrition':>11}{'replaced':>10}{'est. income':>13}{'change':>9}",
+    ]
+    any_partial = False
+    for y in years:
+        partial = not y["is_full_year"]
+        any_partial = any_partial or partial
+        mark = "*" if partial else ""
+        staff = y["avg_subscriber_count"]
+        # The same floor as the monthly rates: too few people for a rate to mean much.
+        rates_ok = staff is not None and staff >= MIN_HEADCOUNT_FOR_RATES
+
+        def rate(value: float | None) -> str:
+            return f"{value * 100:.1f}%{mark}" if rates_ok and value is not None else "-"
+
+        income = y["est_avg_monthly_income"]
+        change = y["income_change_rate"]
+        lines.append(
+            f"  {y['base_year']:<6}{y['months_observed']:>6}{staff:>11,.0f}"
+            f"{y['first_subscriber_count']:>8,}{y['last_subscriber_count']:>8,}"
+            f"{y['new_subscriber_total']:>8,}{y['lost_subscriber_total']:>7,}"
+            f"{rate(y['attrition_rate']):>11}{rate(y['replacement_rate']):>10}"
+            f"{f'{income:,}' if income is not None else '-':>13}"
+            f"{f'{change * 100:+.1f}%' if change is not None else '-':>9}"
+        )
+    if any_partial:
+        lines.append("  * fewer than 12 months of data for that year, so not a full-year rate")
+    lines.append('  attrition = left / avg staff.  replaced = the smaller of joined and left / avg staff.')
     return "\n".join(lines)
 
 
@@ -249,7 +296,7 @@ def format_notes(workplace: dict, months: list[dict]) -> str:
     return "\n".join(lines)
 
 
-BROWSE_PROMPT = "[<] older  [>] newer  [a] all  [q] quit: "
+MONTHLY_KEYS = "[<] older  [>] newer  [a] all"
 
 
 def screen_rows(text: str, columns: int) -> int:
@@ -260,15 +307,18 @@ def screen_rows(text: str, columns: int) -> int:
 def browse(
     months: list[dict],
     shown: list[dict],
+    years: list[dict] | None = None,
     ask=input,
     in_place: bool | None = None,
     terminal_size=shutil.get_terminal_size,
 ) -> None:
-    """Print the history table, then let the user page through it.
+    """Print the history table, then let the user page through it or switch views.
 
-    `<` and `>` move the window by its own length toward older or newer months,
-    `a` shows everything, and `q`, Enter or end of input leaves. Nothing is
-    asked when the whole history is already on screen.
+    In the monthly view `<` and `>` move the window by its own length toward
+    older or newer months and `a` shows everything. With `years` given, `y`
+    switches to the yearly report and `m` back. `q`, Enter or end of input
+    leaves. Nothing is asked when there is nothing else to show: the whole
+    history is on screen and there is no yearly report.
 
     On a terminal the table is redrawn where it stands, so the summary above
     stays in view. That needs the cursor to move back up over what was drawn,
@@ -285,12 +335,19 @@ def browse(
     low = next((i for i, m in enumerate(months) if shown and m is shown[0]), len(months))
     high = low + len(shown)
 
+    view = "monthly"
+
     def block() -> str:
-        return format_history(months, months[low:high])
+        return format_yearly(years) if view == "yearly" else format_history(months, months[low:high])
+
+    def prompt() -> str:
+        if view == "yearly":
+            return "[m] monthly  [q] quit: "
+        return MONTHLY_KEYS + ("  [y] yearly" if years else "") + "  [q] quit: "
 
     drawn = block()  # What is on screen right above the prompt, or None if it cannot be erased.
     print(drawn)
-    if len(shown) >= len(months):
+    if len(shown) >= len(months) and not years:
         return
 
     def erase_drawn(status_shown: str) -> bool:
@@ -309,7 +366,7 @@ def browse(
     status = ""
     while True:
         try:
-            answer = ask(BROWSE_PROMPT).strip().lower()
+            answer = ask(prompt()).strip().lower()
         except EOFError:
             return
         if answer in ("", "q"):
@@ -319,7 +376,14 @@ def browse(
             return
 
         previous_status, status = status, ""
-        if answer == "<":
+        if view == "yearly":
+            if answer == "m":
+                view = "monthly"
+            else:
+                status = "Type m or q."
+        elif answer == "y" and years:
+            view = "yearly"
+        elif answer == "<":
             if low == 0:
                 status = "No earlier months."
             else:
@@ -334,7 +398,7 @@ def browse(
         elif answer == "a":
             low, high = 0, len(months)
         else:
-            status = "Type <, >, a or q."
+            status = "Type <, >, a, y or q." if years else "Type <, >, a or q."
 
         if erase_drawn(previous_status):
             drawn = block()

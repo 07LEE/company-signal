@@ -18,6 +18,7 @@ from .lookup import (
     format_notes,
     format_summary,
     load_detail,
+    load_years,
     open_warehouse,
     pick_months,
     search,
@@ -109,7 +110,7 @@ def cmd_search(args: argparse.Namespace) -> int:
         shown = pick_months(months, last=args.months, start=args.start, end=args.end)
         print(format_summary(workplace, months))
         print()
-        browse(months, shown)
+        browse(months, shown, load_years(con, selected.workplace_id))
         print()
         print(format_notes(workplace, months))
     except (EOFError, KeyboardInterrupt):
