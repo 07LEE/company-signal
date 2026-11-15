@@ -6,6 +6,7 @@ import duckdb
 import pytest
 
 from company_signal.lookup import (
+    browse,
     choose,
     display_width,
     fit,
@@ -230,3 +231,48 @@ def test_detail_summarises_the_latest_month_even_when_an_older_range_is_shown():
     text = format_detail(workplace(months_observed=12), months, pick_months(months, end=date(2026, 2, 1)))
     assert "Latest month: 2026-12" in text
     assert "Monthly history (2026-01 to 2026-02, 2 of 12 months)" in text
+
+
+def titles(capsys):
+    """The history titles printed so far, in order."""
+    return [line for line in capsys.readouterr().out.splitlines() if line.startswith("Monthly history")]
+
+
+def test_browse_moves_the_window_older_and_newer(capsys):
+    months = year_of_months()
+    browse(months, pick_months(months, last=3), ask=answers("<", "<", ">"))
+    assert titles(capsys) == [
+        "Monthly history (2026-07 to 2026-09, 3 of 12 months)",
+        "Monthly history (2026-04 to 2026-06, 3 of 12 months)",
+        "Monthly history (2026-07 to 2026-09, 3 of 12 months)",
+    ]
+
+
+def test_browse_stops_at_both_ends_and_keeps_the_window_length(capsys):
+    months = year_of_months()
+    # Five months a page over twelve: the oldest page is still five months long.
+    browse(months, pick_months(months, last=5), ask=answers(">", "<", "<", "<"))
+    out = capsys.readouterr().out
+    assert out.count("No later months.") == 1
+    assert out.count("No earlier months.") == 1
+    assert "Monthly history (2026-01 to 2026-05, 5 of 12 months)" in out
+
+
+def test_browse_shows_everything_and_rejects_other_keys(capsys):
+    months = year_of_months()
+    browse(months, pick_months(months, last=3), ask=answers("x", "a", "q", "<"))
+    out = capsys.readouterr().out
+    assert "Type <, >, a or q." in out
+    assert [line for line in out.splitlines() if line.startswith("Monthly history")] == ["Monthly history"]
+
+
+def test_browse_asks_nothing_when_the_whole_history_is_shown(capsys):
+    months = year_of_months()
+    browse(months, months, ask=answers())  # answers() raises if asked twice; here it is never asked
+    assert capsys.readouterr().out == ""
+
+
+def test_browse_from_an_empty_range_starts_at_the_newest_months(capsys):
+    months = year_of_months()
+    browse(months, [], ask=answers("<"))
+    assert titles(capsys) == ["Monthly history"]  # twelve months fit in one default page

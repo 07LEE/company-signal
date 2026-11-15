@@ -12,6 +12,7 @@ from .config import load_settings
 from .lookup import (
     DEFAULT_MONTHS,
     WarehouseMissing,
+    browse,
     choose,
     format_detail,
     format_hits,
@@ -106,6 +107,8 @@ def cmd_search(args: argparse.Namespace) -> int:
         workplace, months = load_detail(con, selected.workplace_id)
         shown = pick_months(months, last=args.months, start=args.start, end=args.end)
         print(format_detail(workplace, months, shown))
+        print()
+        browse(months, shown)
     except (EOFError, KeyboardInterrupt):
         print()
         return 130

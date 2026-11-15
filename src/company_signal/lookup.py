@@ -245,3 +245,48 @@ def format_detail(workplace: dict, months: list[dict], shown: list[dict] | None 
             " below the size that is published."
         )
     return "\n".join(lines)
+
+
+BROWSE_PROMPT = "[<] older  [>] newer  [a] all  [q] quit: "
+
+
+def browse(months: list[dict], shown: list[dict], ask=input) -> None:
+    """Page through the history after the detail view has been printed.
+
+    `<` and `>` move the window by its own length toward older or newer months,
+    `a` shows everything, and `q`, Enter or end of input leaves. Nothing is
+    asked when the whole history is already on screen.
+    """
+    if len(shown) >= len(months):
+        return
+    size = len(shown) or DEFAULT_MONTHS
+    # The window is months[low:high]. An empty selection starts past the newest month.
+    low = next((i for i, m in enumerate(months) if shown and m is shown[0]), len(months))
+    high = low + len(shown)
+
+    while True:
+        try:
+            answer = ask(BROWSE_PROMPT).strip().lower()
+        except EOFError:
+            return
+        if answer in ("", "q"):
+            return
+        if answer == "<":
+            if low == 0:
+                print("No earlier months.")
+                continue
+            low = max(0, low - size)
+            high = min(len(months), low + size)
+        elif answer == ">":
+            if high >= len(months):
+                print("No later months.")
+                continue
+            high = min(len(months), high + size)
+            low = max(0, high - size)
+        elif answer == "a":
+            low, high = 0, len(months)
+        else:
+            print("Type <, >, a or q.")
+            continue
+        print()
+        print(format_history(months, months[low:high]))
