@@ -19,30 +19,13 @@ from .store import Store
 # query is recorded as truncated instead of spending the day's quota on it.
 MAX_PAGES_PER_NAME = 3
 
-# Head offices of for-profit corporations, by the two middle digits of the
-# business registration number. A branch (85) has its own number and cannot be
-# tied to its company by number, and individual businesses are not in the API.
-#
-# The search text comes from fsc_query_name, the same function the dbt model
-# uses to tie answers back to workplaces.
+# Which workplaces can be asked about, and by which name, are fsc_can_ask and
+# fsc_query_name: the same functions the lookup and the dbt models use.
 CANDIDATES_SQL = """
-select query_name
-from (
-    select
-        fsc_query_name(name_norm) as query_name,
-        subscriber_count
-    from mart.mart_workplace
-    where in_latest_data
-      and workplace_type_code = '1'
-      and substr(biz_reg_no6, 4, 2) in ('81', '86', '87', '88')
-      -- Construction sites and day-labour units are registered under the
-      -- contractor's name plus a description; they are not companies.
-      and not contains(workplace_name, '/')
-      and not contains(workplace_name, '일용')
-      and not contains(workplace_name, '상용')
-)
-where length(query_name) >= 2
-group by query_name
+select fsc_query_name(name_norm) as query_name
+from mart.mart_workplace
+where in_latest_data and fsc_can_ask(workplace_type_code, biz_reg_no6, workplace_name, name_norm)
+group by 1
 order by max(subscriber_count) desc, query_name
 """
 

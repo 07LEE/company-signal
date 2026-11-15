@@ -254,6 +254,20 @@ class Store:
                 con.execute("ROLLBACK")
                 raise
 
+    def fsc_pages(self, query_name: str) -> list[str] | None:
+        """The stored answer to one name, page by page; None if the name was never asked."""
+        with self.connect() as con:
+            try:
+                asked = con.execute("SELECT 1 FROM meta.fsc_query WHERE query_name = ?", [query_name]).fetchone()
+            except duckdb.CatalogException:
+                return None  # a database made before company disclosures were collected
+            if not asked:
+                return None
+            rows = con.execute(
+                "SELECT body FROM raw.fsc_corp_outline_page WHERE query_name = ? ORDER BY page", [query_name]
+            ).fetchall()
+        return [row[0] for row in rows]
+
     def fsc_counts(self) -> tuple[int, int, int]:
         """(names asked, names with at least one match, names whose answer was truncated)."""
         with self.connect() as con:

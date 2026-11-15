@@ -9,6 +9,7 @@ import os
 import shutil
 import sys
 import unicodedata
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -322,6 +323,24 @@ def format_overall(o: dict) -> str:
     return "\n".join(lines)
 
 
+class LookupFailed(RuntimeError):
+    """Asking for a company's disclosures failed; the message says why."""
+
+
+def format_no_company() -> str:
+    return "\n".join([
+        "Company details",
+        "",
+        "  No company disclosure matches this workplace.",
+        "  None of the companies found by its name has a business registration number",
+        "  starting with this workplace's 6 digits.",
+    ])
+
+
+def format_company_failure(reason: str) -> str:
+    return "\n".join(["Company details", "", f"  Could not look up the company: {reason}", "  Press m, then d to try again."])
+
+
 def format_company(c: dict) -> str:
     """What the corporation discloses about itself. Lines without a value are left out."""
     lines = ["Company details  (reported by the company, for the whole company)", ""]
@@ -422,7 +441,7 @@ def browse(
     shown: list[dict],
     years: list[dict] | None = None,
     overall: dict | None = None,
-    company: dict | None = None,
+    company: dict | Callable[[], dict | None] | None = None,
     ask=input,
     in_place: bool | None = None,
     terminal_size=shutil.get_terminal_size,
@@ -460,6 +479,9 @@ def browse(
         views["s"] = ("summary", "summary")
     if company:
         views["d"] = ("company", "company")
+    # A loader asks for the company only when the view is opened, once. Until
+    # then `company` is the loader; afterwards it is the answer, possibly None.
+    company_failure = ""
 
     def view_text() -> str:
         if view == "yearly":
@@ -467,7 +489,9 @@ def browse(
         if view == "summary":
             return format_overall(overall)
         if view == "company":
-            return format_company(company)
+            if company_failure:
+                return format_company_failure(company_failure)
+            return format_company(company) if company else format_no_company()
         return format_history(months, months[low:high])
 
     def block() -> str:
@@ -492,13 +516,14 @@ def browse(
     drawn = block()  # What is on screen right above the prompt, or None if it cannot be erased.
     print(drawn)
 
-    def erase_drawn(status_shown: str) -> bool:
+    def erase_drawn(status_shown: str, extra_rows: int = 0) -> bool:
         """Clear the table, a status line and the prompt line, if they can still be reached."""
         columns, rows = terminal_size()
         if not in_place or drawn is None:
             return False
-        # Rows between the top of the table and the cursor: the table, a status line, the prompt line.
-        used = screen_rows(drawn, columns) + (1 if status_shown else 0) + 1
+        # Rows between the top of the table and the cursor: the table, a status
+        # line, the prompt line, and any line printed after the prompt.
+        used = screen_rows(drawn, columns) + (1 if status_shown else 0) + 1 + extra_rows
         if used >= rows:
             return False
         # Go up to the first drawn row and clear from there to the end of the screen.
@@ -518,8 +543,17 @@ def browse(
             return
 
         previous_status, status = status, ""
+        extra_rows = 0
         if answer in views and views[answer][0] != view:
             view = views[answer][0]
+            if view == "company" and callable(company):
+                print("Looking up the company's disclosures...", flush=True)
+                extra_rows = 1
+                try:
+                    company = company()
+                    company_failure = ""
+                except LookupFailed as exc:
+                    company_failure = str(exc)  # the loader stays, so d tries again
         elif view != "monthly":
             status = valid_keys()
         elif answer == "<":
@@ -539,7 +573,7 @@ def browse(
         else:
             status = valid_keys()
 
-        if erase_drawn(previous_status):
+        if erase_drawn(previous_status, extra_rows):
             drawn = block()
             print(drawn)
             if status:
