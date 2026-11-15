@@ -2,10 +2,13 @@
 --
 -- The source has no workplace key, and only the first 6 digits of the business
 -- registration number are published. The key is built from those 6 digits, the
--- normalized name, the legal-dong code and the date the workplace joined the
--- pension scheme. Source rows that still share a key in the same month (about
--- 0.01% of rows) are units the data cannot tell apart; they are summed and
--- counted in source_row_count.
+-- normalized name and the date the workplace joined the pension scheme.
+--
+-- The address is deliberately not part of the key: about 2,400 workplaces a
+-- month move, and with the legal-dong code in the key each of them looked like
+-- one workplace closing and another opening. Source rows that share a key in
+-- the same month (about 0.02% of rows) are units the data cannot tell apart;
+-- they are summed and counted in source_row_count.
 
 with selected as (
 
@@ -33,13 +36,13 @@ keyed as (
 )
 
 select
-    md5(concat_ws('|', biz_reg_no6, name_norm, legal_dong_code, coalesce(applied_on::varchar, ''))) as workplace_id,
+    md5(concat_ws('|', biz_reg_no6, name_norm, coalesce(applied_on::varchar, ''))) as workplace_id,
     base_ym,
     arg_max(workplace_name, subscriber_count) as workplace_name,
     name_norm,
     biz_reg_no6,
-    legal_dong_code,
     applied_on,
+    arg_max(legal_dong_code, subscriber_count) as legal_dong_code,
     min(join_status_code) as join_status_code,
     arg_max(workplace_type_code, subscriber_count) as workplace_type_code,
     arg_max(road_address, subscriber_count) as road_address,
@@ -53,4 +56,4 @@ select
     sum(lost_subscriber_count)::integer as lost_subscriber_count,
     count(*)::integer as source_row_count
 from keyed
-group by base_ym, biz_reg_no6, name_norm, legal_dong_code, applied_on
+group by base_ym, biz_reg_no6, name_norm, applied_on
