@@ -1,9 +1,9 @@
 import re
 from datetime import date
-from pathlib import Path
 
 import duckdb
 import pytest
+from conftest import register_functions
 
 from company_signal.lookup import (
     browse,
@@ -11,6 +11,7 @@ from company_signal.lookup import (
     display_width,
     fit,
     format_history,
+    format_company,
     format_hits,
     format_notes,
     format_overall,
@@ -22,15 +23,11 @@ from company_signal.lookup import (
     shown_rate,
 )
 
-MACRO_FILE = Path(__file__).parent.parent / "transform" / "macros" / "create_functions.sql"
-
-
 @pytest.fixture
 def warehouse():
     """A tiny warehouse with the real normalize_name definition from the dbt project."""
     con = duckdb.connect()
-    body = re.search(r"{% macro create_functions\(\) %}(.*){% endmacro %}", MACRO_FILE.read_text(), re.S)[1]
-    con.execute(body)
+    register_functions(con)
     con.execute("create schema mart")
     con.execute(
         """
@@ -300,8 +297,8 @@ def test_browse_in_place_erases_exactly_what_it_drew(capsys):
     months = year_of_months()
     browse(months, pick_months(months, last=3), ask=answers("<"), in_place=True, terminal_size=tall_terminal())
     out = capsys.readouterr().out
-    # Drawn: title, header and 3 months are 5 rows, plus the prompt line.
-    assert "\x1b[6F\x1b[J" in out
+    # Drawn: title, header and 3 months are 5 rows, a blank line, then the prompt line.
+    assert "\x1b[7F\x1b[J" in out
     assert out.count("Monthly history") == 2
 
 
@@ -310,7 +307,7 @@ def test_browse_in_place_counts_the_status_line_when_erasing(capsys):
     browse(months, pick_months(months, last=3), ask=answers(">", ">"), in_place=True, terminal_size=tall_terminal())
     out = capsys.readouterr().out
     assert out.count("No later months.") == 2
-    assert "\x1b[6F" in out and "\x1b[7F" in out  # the second erase also covers the first message
+    assert "\x1b[7F" in out and "\x1b[8F" in out  # the second erase also covers the first message
 
 
 def test_browse_in_place_leaves_only_the_table_when_quitting(capsys):
@@ -321,6 +318,7 @@ def test_browse_in_place_leaves_only_the_table_when_quitting(capsys):
     # What is drawn after the last erase is the table alone: no message, no prompt.
     final = out.rsplit("\x1b[J", 1)[1]
     assert final.startswith("Monthly history (2026-10 to 2026-12, 3 of 12 months)")
+    assert final.endswith("  2026-12          100       1      1     1.0%     1.0%     3,000,000\n")  # no trailing blank line
     assert "Type" not in final
 
 
@@ -451,7 +449,8 @@ def test_overall_shows_three_spans_side_by_side():
     assert cells(text, "replaced / year") == ["11.0%", "14.0%", "18.0%"]
     assert cells(text, "implied tenure") == ["8.0 years", "6.2 years", "5.0 years"]
     assert "3,000,000 to 3,300,000  (+1.9% a year)" in text
-    assert text.splitlines()[-1] == '  "-" needs more months. Implied tenure = 1 / attrition, not a measured tenure.'
+    # Every cell has a value, so "-" is not explained.
+    assert text.splitlines()[-1] == "  Implied tenure = 1 / attrition, not a measured tenure."
 
 
 def test_overall_leaves_a_span_empty_until_its_months_exist():
@@ -460,6 +459,7 @@ def test_overall_leaves_a_span_empty_until_its_months_exist():
     )
     assert cells(text, "attrition / year") == ["12.5%", "-", "20.0%"]
     assert cells(text, "implied tenure") == ["8.0 years", "-", "5.0 years"]
+    assert text.splitlines()[-1] == '  "-" needs more months. Implied tenure = 1 / attrition, not a measured tenure.'
 
 
 def test_overall_caps_tenure_at_the_age_of_the_workplace():
@@ -495,3 +495,62 @@ def test_browse_reaches_every_view_and_names_the_others_in_the_prompt(capsys):
     assert prompts[2] == "[m] monthly  [s] summary  [q] quit: "
     assert "Summary  2021-01 to 2025-12" in out and "Yearly report" in out
     assert "Type m, s or q." in out  # paging keys do nothing outside the monthly view
+
+
+def company(**overrides):
+    base = {
+        "crno": "1101110000001",
+        "corp_name": "(주)한빛",
+        "bzno": "1238112345",
+        "established_on": date(2011, 3, 2),
+        "industry_name": "응용 소프트웨어 개발 및 공급업",
+        "main_business": None,
+        "employee_count": 642,
+        "avg_tenure_years": 5.48,
+        "avg_yearly_pay": 53_651_000,
+        "figures_published_on": date(2026, 11, 14),
+    }
+    return base | overrides
+
+
+def test_company_shows_what_was_disclosed_and_where_it_comes_from():
+    text = format_company(company())
+    assert text.splitlines()[0] == "Company details  (reported by the company, for the whole company)"
+    assert "  registration no. 123-81-12345" in text
+    assert "  employees        642" in text
+    assert "  avg tenure       5.5 years" in text
+    assert "  avg yearly pay   53,651,000 KRW" in text
+    assert "Figures as published on 2026-11-14" in text
+    assert "not only this workplace" in text
+    assert "main business" not in text  # not disclosed, so no line
+
+
+def test_company_without_figures_says_so():
+    text = format_company(company(employee_count=None, avg_tenure_years=None, avg_yearly_pay=None, figures_published_on=None))
+    assert "employees" not in text and "avg tenure" not in text
+    assert "has disclosed no staff, tenure or pay figures" in text
+
+
+def test_browse_offers_company_details_only_when_tied():
+    months = year_of_months()
+    seen = []
+
+    def ask(prompt):
+        seen.append(prompt)
+        return "d" if len(seen) == 1 else "q"
+
+    browse(months, pick_months(months, last=3), company=company(), ask=ask, in_place=False)
+    assert "[d] company" in seen[0]
+    assert seen[1] == "[m] monthly  [q] quit: "
+
+    seen.clear()
+    browse(months, pick_months(months, last=3), ask=lambda prompt: seen.append(prompt) or "q", in_place=False)
+    assert "[d]" not in seen[0]
+
+
+def test_browse_puts_a_blank_line_between_the_view_and_the_prompt(capsys):
+    months = year_of_months()
+    browse(months, pick_months(months, last=3), ask=answers("x", "q"), in_place=False)
+    lines = capsys.readouterr().out.splitlines()
+    first_table_end = lines.index("  2026-12          100       1      1     1.0%     1.0%     3,000,000")
+    assert lines[first_table_end + 1] == ""

@@ -9,11 +9,14 @@ import os
 import shutil
 import sys
 import unicodedata
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
 import duckdb
+
+from .sqlfunctions import register_functions
 
 WORKPLACE_TYPES = {"1": "corporation", "2": "individual"}
 
@@ -46,7 +49,11 @@ def open_warehouse(path: Path) -> duckdb.DuckDBPyConnection:
         raise WarehouseMissing(
             f"{path} does not exist. Build it first: dbt build --project-dir transform --profiles-dir transform"
         )
-    return duckdb.connect(str(path), read_only=True)
+    con = duckdb.connect(str(path), read_only=True)
+    # The functions come from the package, not from the file, so a warehouse
+    # built by an older version still reads with today's rules.
+    register_functions(con, temporary=True)
+    return con
 
 
 # Workplaces still present in the latest month come first, then an exact name
@@ -159,6 +166,19 @@ def load_years(con: duckdb.DuckDBPyConnection, workplace_id: str) -> list[dict]:
         return []
     columns = [d[0] for d in cursor.description]
     return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+
+def load_company(con: duckdb.DuckDBPyConnection, workplace_id: str) -> dict | None:
+    """The corporation a workplace is tied to by its disclosures, or None.
+
+    None also when the warehouse was built before disclosures were collected.
+    """
+    try:
+        cursor = con.execute("select * from mart.mart_workplace_company where workplace_id = ?", [workplace_id])
+    except duckdb.CatalogException:
+        return None
+    row = cursor.fetchone()
+    return dict(zip([d[0] for d in cursor.description], row)) if row else None
 
 
 def load_overall(con: duckdb.DuckDBPyConnection, workplace_id: str) -> dict | None:
@@ -290,18 +310,69 @@ def format_overall(o: dict) -> str:
         # Nobody can have stayed longer than the workplace has been in the scheme.
         return f"over {age:.1f} years" if age is not None and value > age else f"{value:.1f} years"
 
-    def spans(label: str, cells: list[str]) -> None:
+    rows = {
+        "attrition / year": [percent(o[f"attrition_rate_{key}"]) for _, key, _ in SPANS],
+        "replaced / year": [percent(o[f"replacement_rate_{key}"]) for _, key, _ in SPANS],
+        "implied tenure": [tenure(o[f"implied_tenure_years{suffix}"]) for _, _, suffix in SPANS],
+    }
+    lines.append("")
+    for label, cells in {"": [title for title, _, _ in SPANS], **rows}.items():
         lines.append(f"  {label:<18}" + "".join(f"{cell:>16}" for cell in cells))
 
     lines.append("")
-    spans("", [title for title, _, _ in SPANS])
-    spans("attrition / year", [percent(o[f"attrition_rate_{key}"]) for _, key, _ in SPANS])
-    spans("replaced / year", [percent(o[f"replacement_rate_{key}"]) for _, key, _ in SPANS])
-    spans("implied tenure", [tenure(o[f"implied_tenure_years{suffix}"]) for _, _, suffix in SPANS])
+    note = "Implied tenure = 1 / attrition, not a measured tenure."
+    # Explain "-" only when there is one on screen.
+    if any(cell == "-" for cells in rows.values() for cell in cells):
+        reason = f"hidden below {MIN_HEADCOUNT_FOR_RATES} staff" if too_small else "needs more months"
+        note = f'"-" {reason}. {note}'
+    lines.append(f"  {note}")
+    return "\n".join(lines)
+
+
+class LookupFailed(RuntimeError):
+    """Asking for a company's disclosures failed; the message says why."""
+
+
+def format_no_company() -> str:
+    return "\n".join([
+        "Company details",
+        "",
+        "  No company disclosure matches this workplace.",
+        "  None of the companies found by its name has a business registration number",
+        "  starting with this workplace's 6 digits.",
+    ])
+
+
+def format_company_failure(reason: str) -> str:
+    return "\n".join(["Company details", "", f"  Could not look up the company: {reason}", "  Press m, then d to try again."])
+
+
+def format_company(c: dict) -> str:
+    """What the corporation discloses about itself. Lines without a value are left out."""
+    lines = ["Company details  (reported by the company, for the whole company)", ""]
+
+    def row(label: str, value) -> None:
+        if value is not None and value != "":
+            lines.append(f"  {label:<17}{value}")
+
+    bzno = c["bzno"] or ""
+    row("company", c["corp_name"])
+    row("registration no.", f"{bzno[:3]}-{bzno[3:5]}-{bzno[5:]}" if len(bzno) == 10 else bzno)
+    row("established", c["established_on"])
+    row("industry", c["industry_name"])
+    row("main business", c["main_business"])
+    row("employees", f"{c['employee_count']:,}" if c["employee_count"] is not None else None)
+    row("avg tenure", f"{c['avg_tenure_years']:.1f} years" if c["avg_tenure_years"] is not None else None)
+    row("avg yearly pay", f"{c['avg_yearly_pay']:,} KRW" if c["avg_yearly_pay"] is not None else None)
 
     lines.append("")
-    reason = f"hidden below {MIN_HEADCOUNT_FOR_RATES} staff" if too_small else "needs more months"
-    lines.append(f'  "-" {reason}. Implied tenure = 1 / attrition, not a measured tenure.')
+    if c["figures_published_on"] is not None:
+        lines.append(f"  Figures as published on {c['figures_published_on']}, from the corporate outline of the")
+        lines.append("  Financial Services Commission. They cover the whole company, not only this workplace.")
+    else:
+        lines.append("  The company has disclosed no staff, tenure or pay figures in the corporate outline")
+        lines.append("  of the Financial Services Commission.")
+    lines.append("  Tied by the company name and the first 6 digits of the business registration number.")
     return "\n".join(lines)
 
 
@@ -376,6 +447,7 @@ def browse(
     shown: list[dict],
     years: list[dict] | None = None,
     overall: dict | None = None,
+    company: dict | Callable[[], dict | None] | None = None,
     ask=input,
     in_place: bool | None = None,
     terminal_size=shutil.get_terminal_size,
@@ -384,10 +456,10 @@ def browse(
 
     In the monthly view `<` and `>` move the window by its own length toward
     older or newer months and `a` shows everything. `y` switches to the yearly
-    report and `s` to the whole-period summary, when the caller has them, and
-    `m` goes back to the months. `q`, Enter or end of input leaves. Nothing is
-    asked when there is nothing else to show: the whole history is on screen
-    and there is no other view.
+    report, `s` to the whole-period summary and `d` to the company's own
+    disclosures, when the caller has them, and `m` goes back to the months.
+    `q`, Enter or end of input leaves. Nothing is asked when there is nothing
+    else to show: the whole history is on screen and there is no other view.
 
     On a terminal the table is redrawn where it stands, so the summary above
     stays in view. That needs the cursor to move back up over what was drawn,
@@ -411,13 +483,26 @@ def browse(
         views["y"] = ("yearly", "yearly")
     if overall:
         views["s"] = ("summary", "summary")
+    if company:
+        views["d"] = ("company", "company")
+    # A loader asks for the company only when the view is opened, once. Until
+    # then `company` is the loader; afterwards it is the answer, possibly None.
+    company_failure = ""
 
-    def block() -> str:
+    def view_text() -> str:
         if view == "yearly":
             return format_yearly(years)
         if view == "summary":
             return format_overall(overall)
+        if view == "company":
+            if company_failure:
+                return format_company_failure(company_failure)
+            return format_company(company) if company else format_no_company()
         return format_history(months, months[low:high])
+
+    def block() -> str:
+        # A blank line keeps the view apart from the prompt below it.
+        return view_text() + "\n"
 
     def other_views() -> list[tuple[str, str]]:
         return [(key, label) for key, (name, label) in views.items() if name != view]
@@ -431,18 +516,20 @@ def browse(
         keys = (["<", ">", "a"] if view == "monthly" else []) + [key for key, _ in other_views()]
         return "Type " + ", ".join(keys) + " or q."
 
+    if len(shown) >= len(months) and len(views) == 1:
+        print(view_text())  # nothing else to show, so no prompt
+        return
     drawn = block()  # What is on screen right above the prompt, or None if it cannot be erased.
     print(drawn)
-    if len(shown) >= len(months) and len(views) == 1:
-        return
 
-    def erase_drawn(status_shown: str) -> bool:
+    def erase_drawn(status_shown: str, extra_rows: int = 0) -> bool:
         """Clear the table, a status line and the prompt line, if they can still be reached."""
         columns, rows = terminal_size()
         if not in_place or drawn is None:
             return False
-        # Rows between the top of the table and the cursor: the table, a status line, the prompt line.
-        used = screen_rows(drawn, columns) + (1 if status_shown else 0) + 1
+        # Rows between the top of the table and the cursor: the table, a status
+        # line, the prompt line, and any line printed after the prompt.
+        used = screen_rows(drawn, columns) + (1 if status_shown else 0) + 1 + extra_rows
         if used >= rows:
             return False
         # Go up to the first drawn row and clear from there to the end of the screen.
@@ -456,14 +543,23 @@ def browse(
         except EOFError:
             return
         if answer in ("", "q"):
-            # Leave only the table behind, without the prompt or a leftover message.
+            # Leave only the view behind, without the prompt, a leftover message or the blank line.
             if erase_drawn(status):
-                print(drawn)
+                print(view_text())
             return
 
         previous_status, status = status, ""
+        extra_rows = 0
         if answer in views and views[answer][0] != view:
             view = views[answer][0]
+            if view == "company" and callable(company):
+                print("Looking up the company's disclosures...", flush=True)
+                extra_rows = 1
+                try:
+                    company = company()
+                    company_failure = ""
+                except LookupFailed as exc:
+                    company_failure = str(exc)  # the loader stays, so d tries again
         elif view != "monthly":
             status = valid_keys()
         elif answer == "<":
@@ -483,7 +579,7 @@ def browse(
         else:
             status = valid_keys()
 
-        if erase_drawn(previous_status):
+        if erase_drawn(previous_status, extra_rows):
             drawn = block()
             print(drawn)
             if status:

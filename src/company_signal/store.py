@@ -41,6 +41,49 @@ CREATE TABLE IF NOT EXISTS meta.page_fetch (
     PRIMARY KEY (publication_id, page)
 );
 
+-- One row per company name asked of the corporate outline API. A name that
+-- matched nothing is recorded too, so it is not asked again.
+CREATE TABLE IF NOT EXISTS meta.fsc_query (
+    query_name    VARCHAR PRIMARY KEY,
+    total_count   INTEGER NOT NULL,
+    pages_fetched INTEGER NOT NULL,
+    truncated     BOOLEAN NOT NULL,   -- more matches than the pages that were fetched
+    fetched_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- The responses to those questions, the text exactly as received.
+CREATE TABLE IF NOT EXISTS raw.fsc_corp_outline_page (
+    query_name VARCHAR NOT NULL,
+    page       INTEGER NOT NULL,
+    body       VARCHAR NOT NULL,
+    PRIMARY KEY (query_name, page)
+);
+
+-- Answers to the conditional queries of a live lookup, one row per query.
+-- A publication never changes, so an answer stays valid for good.
+CREATE TABLE IF NOT EXISTS meta.nps_live_query (
+    publication_id VARCHAR NOT NULL,
+    column_name    VARCHAR NOT NULL,
+    operator       VARCHAR NOT NULL,   -- LIKE or EQ
+    value          VARCHAR NOT NULL,
+    match_count    INTEGER NOT NULL,
+    pages_fetched  INTEGER NOT NULL,
+    fetched_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (publication_id, column_name, operator, value)
+);
+
+-- The pages of those answers, exactly as received. Kept apart from the
+-- collected publications so the dbt build only ever sees whole publications.
+CREATE TABLE IF NOT EXISTS raw.nps_live_page (
+    publication_id VARCHAR NOT NULL,
+    column_name    VARCHAR NOT NULL,
+    operator       VARCHAR NOT NULL,
+    value          VARCHAR NOT NULL,
+    page           INTEGER NOT NULL,
+    body           VARCHAR NOT NULL,
+    PRIMARY KEY (publication_id, column_name, operator, value, page)
+);
+
 -- Source records, kept as received. Column names differ by period, so they stay as JSON.
 CREATE TABLE IF NOT EXISTS raw.nps_workplace_record (
     publication_id VARCHAR NOT NULL,
@@ -209,3 +252,95 @@ class Store:
             total = con.execute("SELECT count(*) FROM meta.publication").fetchone()[0]
             rows = con.execute("SELECT count(*) FROM raw.nps_workplace_record").fetchone()[0]
         return total, rows
+
+    def fsc_queried_names(self) -> set[str]:
+        with self.connect() as con:
+            return {row[0] for row in con.execute("SELECT query_name FROM meta.fsc_query").fetchall()}
+
+    def record_fsc_response(self, query_name: str, pages: list[str], total_count: int, truncated: bool) -> None:
+        """Store every page of one name's answer, replacing an earlier answer to the same name."""
+        with self.connect() as con:
+            con.execute("BEGIN")
+            try:
+                con.execute("DELETE FROM raw.fsc_corp_outline_page WHERE query_name = ?", [query_name])
+                con.executemany(
+                    "INSERT INTO raw.fsc_corp_outline_page (query_name, page, body) VALUES (?, ?, ?)",
+                    [(query_name, number, body) for number, body in enumerate(pages, 1)],
+                )
+                con.execute(
+                    """
+                    INSERT OR REPLACE INTO meta.fsc_query (query_name, total_count, pages_fetched, truncated)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    [query_name, total_count, len(pages), truncated],
+                )
+                con.execute("COMMIT")
+            except Exception:
+                con.execute("ROLLBACK")
+                raise
+
+    def nps_live_pages(self, publication_id: str, column_name: str, operator: str, value: str) -> list[str] | None:
+        """A stored answer to one conditional query, page by page; None if never asked."""
+        with self.connect() as con:
+            try:
+                asked = con.execute(
+                    "SELECT 1 FROM meta.nps_live_query WHERE publication_id = ? AND column_name = ? AND operator = ? AND value = ?",
+                    [publication_id, column_name, operator, value],
+                ).fetchone()
+            except duckdb.CatalogException:
+                return None  # a database made before live lookups were stored
+            if not asked:
+                return None
+            rows = con.execute(
+                """
+                SELECT body FROM raw.nps_live_page
+                WHERE publication_id = ? AND column_name = ? AND operator = ? AND value = ?
+                ORDER BY page
+                """,
+                [publication_id, column_name, operator, value],
+            ).fetchall()
+        return [row[0] for row in rows]
+
+    def record_nps_live_answer(
+        self, publication_id: str, column_name: str, operator: str, value: str, pages: list[str], match_count: int
+    ) -> None:
+        key = [publication_id, column_name, operator, value]
+        with self.connect() as con:
+            con.execute("BEGIN")
+            try:
+                con.execute(
+                    "DELETE FROM raw.nps_live_page WHERE publication_id = ? AND column_name = ? AND operator = ? AND value = ?", key
+                )
+                con.executemany(
+                    "INSERT INTO raw.nps_live_page VALUES (?, ?, ?, ?, ?, ?)",
+                    [(*key, number, body) for number, body in enumerate(pages, 1)],
+                )
+                con.execute(
+                    "INSERT OR REPLACE INTO meta.nps_live_query (publication_id, column_name, operator, value, match_count, pages_fetched) VALUES (?, ?, ?, ?, ?, ?)",
+                    [*key, match_count, len(pages)],
+                )
+                con.execute("COMMIT")
+            except Exception:
+                con.execute("ROLLBACK")
+                raise
+
+    def fsc_pages(self, query_name: str) -> list[str] | None:
+        """The stored answer to one name, page by page; None if the name was never asked."""
+        with self.connect() as con:
+            try:
+                asked = con.execute("SELECT 1 FROM meta.fsc_query WHERE query_name = ?", [query_name]).fetchone()
+            except duckdb.CatalogException:
+                return None  # a database made before company disclosures were collected
+            if not asked:
+                return None
+            rows = con.execute(
+                "SELECT body FROM raw.fsc_corp_outline_page WHERE query_name = ? ORDER BY page", [query_name]
+            ).fetchall()
+        return [row[0] for row in rows]
+
+    def fsc_counts(self) -> tuple[int, int, int]:
+        """(names asked, names with at least one match, names whose answer was truncated)."""
+        with self.connect() as con:
+            return con.execute(
+                "SELECT count(*), count(*) FILTER (WHERE total_count > 0), count(*) FILTER (WHERE truncated) FROM meta.fsc_query"
+            ).fetchone()

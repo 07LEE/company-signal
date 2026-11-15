@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import argparse
 import sys
-from contextlib import closing
+from contextlib import closing, nullcontext
 from datetime import date
+
+import duckdb
 
 from .api import Client, FetchError
 from .collect import collect
-from .config import load_settings
+from .config import KEY_ENV, Settings, load_settings
+from .disclosure import company_from_answer, company_loader, query_name_if_askable
+from .enrich import enrich
+from .live import fetch_history, search_live
+from .fsc import FscClient
 from .lookup import (
     DEFAULT_MONTHS,
     WarehouseMissing,
@@ -19,6 +25,7 @@ from .lookup import (
     format_notes,
     format_summary,
     load_detail,
+    load_company,
     load_overall,
     load_years,
     open_warehouse,
@@ -45,6 +52,26 @@ def cmd_collect(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_enrich(args: argparse.Namespace) -> int:
+    settings = load_settings()
+    if not settings.warehouse_path.exists():
+        print("Build the lookup tables first: dbt build --project-dir transform --profiles-dir transform", file=sys.stderr)
+        return 1
+    client = FscClient(settings.service_key, interval=args.interval)
+    try:
+        enrich(client, Store(settings.db_path), settings.warehouse_path, args.max_calls)
+    except FetchError as exc:
+        print(f"Stopped: {exc}", file=sys.stderr)
+        print("Run the same command again to continue.", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("\nInterrupted. Run the same command again to continue.", file=sys.stderr)
+        return 130
+    finally:
+        client.close()
+    return 0
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     settings = load_settings(require_key=False)
     if not settings.db_path.exists():
@@ -59,6 +86,12 @@ def cmd_status(args: argparse.Namespace) -> int:
             f"{str(title_date):<12}{status:<13}{fetched:>12,}{(total or 0):>12,}"
             f"{f'{pages}/{page_count or 0}':>11}  {title}"
         )
+    try:
+        asked, matched, truncated = store.fsc_counts()
+    except duckdb.CatalogException:
+        return 0  # a database made before company disclosures were collected
+    if asked:
+        print(f"company disclosures: {asked:,} names asked, {matched:,} with a match, {truncated:,} truncated")
     return 0
 
 
@@ -80,11 +113,61 @@ def month(text: str) -> date:
         raise argparse.ArgumentTypeError("give a month as YYYY-MM, for example 2025-03") from None
 
 
+def company_for_untied(settings: Settings, workplace_id: str, query_name: str, connect=None):
+    """For a workplace the warehouse has not tied: the company, a loader, or None.
+
+    An answer already collected for its name is used straight away; it may be
+    newer than the last dbt build. Without one, the workplace gets a loader that
+    asks the API when the user opens the company view, if there is a key to ask with.
+    `connect` gives the connection that holds the workplace; by default the warehouse.
+    """
+    if connect is None:
+        def connect():
+            return closing(open_warehouse(settings.warehouse_path))
+    store = Store(settings.db_path)
+    pages = store.fsc_pages(query_name) if settings.db_path.exists() else None
+    if pages is not None:
+        with connect() as con:
+            return company_from_answer(con, workplace_id, query_name, pages)
+    if settings.service_key:
+        return company_loader(connect, store, settings.service_key, workplace_id, query_name, None)
+    return None
+
+
+def fetch_live_history(settings: Settings, live, workplace_id: str, args: argparse.Namespace) -> None:
+    """Fetch as many earlier months as the view asks for (--months, --from), showing progress."""
+    shown = False
+
+    def progress(done: int, total: int) -> None:
+        nonlocal shown
+        shown = True
+        print(f"\rFetching earlier months from the pension API: {done}/{total}", end="", flush=True)
+
+    client = Client(settings.service_key)
+    try:
+        stopped = fetch_history(client, live, workplace_id, args.months, args.start, progress, Store(settings.db_path))
+    finally:
+        client.close()
+    if shown:
+        print()
+    if stopped:
+        print(f"Stopped fetching earlier months: {stopped}")
+
+
 def cmd_search(args: argparse.Namespace) -> int:
     if args.start and args.end and args.start > args.end:
         print("--from must not be later than --to.", file=sys.stderr)
         return 2
-    warehouse = load_settings(require_key=False).warehouse_path
+    settings = load_settings(require_key=False)
+    warehouse = settings.warehouse_path
+    if not warehouse.exists() and not settings.service_key:
+        print(
+            f"{warehouse} does not exist. Build it (dbt build --project-dir transform --profiles-dir transform),"
+            f" or put {KEY_ENV} in .env to search the pension API directly.",
+            file=sys.stderr,
+        )
+        return 1
+    live = None  # set when the search went to the API: an in-memory warehouse for this search
     try:
         name = args.name
         if name is None:
@@ -98,8 +181,27 @@ def cmd_search(args: argparse.Namespace) -> int:
         # The warehouse is open only while reading, never while waiting for a
         # key. A lookup left sitting at a prompt would otherwise keep the file
         # open and block the next dbt build from writing to it.
-        with closing(open_warehouse(warehouse)) as con:
-            hits, total = search(con, name, args.limit)
+        hits, total = [], 0
+        if warehouse.exists():
+            with closing(open_warehouse(warehouse)) as con:
+                hits, total = search(con, name, args.limit)
+        if not hits and settings.service_key:
+            client = Client(settings.service_key)
+            store = Store(settings.db_path)
+            store.init()
+            try:
+                live = search_live(client, name, store, announce=lambda: print("Not in the collected data; searching the pension API..."))
+            except FetchError as exc:
+                print(f"Could not search the pension API: {exc}", file=sys.stderr)
+                return 1
+            finally:
+                client.close()
+            if live is not None:
+                hits, total = search(live.con, name, args.limit)
+                origin = "a stored answer" if live.answers_reused else "the API"
+                print(f"Live lookup of {live.base_ym}, the latest month, from {origin}.")
+                if live.truncated:
+                    print(f"The API found {live.match_count:,} workplaces; only the first {live.fetched:,} were read. Search with a longer name.")
         print(format_hits(hits, total, name))
         # Piped output gets the list only; a person at a terminal gets to pick one.
         if not sys.stdin.isatty():
@@ -107,18 +209,31 @@ def cmd_search(args: argparse.Namespace) -> int:
         selected = choose(hits)
         if selected is None:
             return 0
+        if live:
+            fetch_live_history(settings, live, selected.workplace_id, args)
 
-        with closing(open_warehouse(warehouse)) as con:
+        with nullcontext(live.con) if live else closing(open_warehouse(warehouse)) as con:
             workplace, months = load_detail(con, selected.workplace_id)
             years = load_years(con, selected.workplace_id)
             overall = load_overall(con, selected.workplace_id)
+            company = load_company(con, selected.workplace_id)
+            query_name = None if company else query_name_if_askable(con, selected.workplace_id)
+        if query_name:
+            # A live lookup's workplace is in its in-memory database, not in the warehouse.
+            connect = (lambda: nullcontext(live.con)) if live else None
+            company = company_for_untied(settings, selected.workplace_id, query_name, connect)
         shown = pick_months(months, last=args.months, start=args.start, end=args.end)
         print()
         print(format_summary(workplace, months))
         print()
-        browse(months, shown, years, overall)
+        browse(months, shown, years, overall, company)
         print()
         print(format_notes(workplace, months))
+        if live:
+            print(
+                f"  - Live lookup of {live.span}: {live.calls_made} API calls, {live.answers_reused} stored answers reused."
+                f" Answers are kept in {settings.db_path.name} for next time."
+            )
     except WarehouseMissing as exc:
         print(exc, file=sys.stderr)
         return 1
@@ -128,6 +243,9 @@ def cmd_search(args: argparse.Namespace) -> int:
     except (EOFError, KeyboardInterrupt):
         print()
         return 130
+    finally:
+        if live:
+            live.con.close()
     return 0
 
 
@@ -140,6 +258,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-pages", type=int, default=None, help="max pages per publication (for testing)")
     p.add_argument("--interval", type=float, default=0.2, help="seconds to wait between calls")
     p.set_defaults(func=cmd_collect)
+
+    p = sub.add_parser("enrich", help="collect company disclosures for the workplaces, largest first")
+    p.add_argument("--max-calls", type=int, default=9000, help="API calls to spend in this run (default 9000; the key allows 10000 a day)")
+    p.add_argument("--interval", type=float, default=0.1, help="seconds to wait between calls")
+    p.set_defaults(func=cmd_enrich)
 
     p = sub.add_parser("status", help="show collection progress")
     p.set_defaults(func=cmd_status)

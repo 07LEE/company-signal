@@ -56,3 +56,15 @@ models:
         data_tests: [unique, not_null]
       - name: months_observed
         data_tests: [not_null]
+
+  - name: int_fsc__corporation
+    columns:
+      - name: crno
+        data_tests: [unique, not_null]
+
+  - name: mart_workplace_company
+    columns:
+      - name: workplace_id
+        data_tests: [unique, not_null]
+      - name: crno
+        data_tests: [not_null]
