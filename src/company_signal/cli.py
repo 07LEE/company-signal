@@ -7,9 +7,13 @@ import sys
 from contextlib import closing
 from datetime import date
 
+import duckdb
+
 from .api import Client, FetchError
 from .collect import collect
 from .config import load_settings
+from .enrich import enrich
+from .fsc import FscClient
 from .lookup import (
     DEFAULT_MONTHS,
     WarehouseMissing,
@@ -45,6 +49,26 @@ def cmd_collect(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_enrich(args: argparse.Namespace) -> int:
+    settings = load_settings()
+    if not settings.warehouse_path.exists():
+        print("Build the lookup tables first: dbt build --project-dir transform --profiles-dir transform", file=sys.stderr)
+        return 1
+    client = FscClient(settings.service_key, interval=args.interval)
+    try:
+        enrich(client, Store(settings.db_path), settings.warehouse_path, args.max_calls)
+    except FetchError as exc:
+        print(f"Stopped: {exc}", file=sys.stderr)
+        print("Run the same command again to continue.", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("\nInterrupted. Run the same command again to continue.", file=sys.stderr)
+        return 130
+    finally:
+        client.close()
+    return 0
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     settings = load_settings(require_key=False)
     if not settings.db_path.exists():
@@ -59,6 +83,12 @@ def cmd_status(args: argparse.Namespace) -> int:
             f"{str(title_date):<12}{status:<13}{fetched:>12,}{(total or 0):>12,}"
             f"{f'{pages}/{page_count or 0}':>11}  {title}"
         )
+    try:
+        asked, matched, truncated = store.fsc_counts()
+    except duckdb.CatalogException:
+        return 0  # a database made before company disclosures were collected
+    if asked:
+        print(f"company disclosures: {asked:,} names asked, {matched:,} with a match, {truncated:,} truncated")
     return 0
 
 
@@ -140,6 +170,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-pages", type=int, default=None, help="max pages per publication (for testing)")
     p.add_argument("--interval", type=float, default=0.2, help="seconds to wait between calls")
     p.set_defaults(func=cmd_collect)
+
+    p = sub.add_parser("enrich", help="collect company disclosures for the workplaces, largest first")
+    p.add_argument("--max-calls", type=int, default=9000, help="API calls to spend in this run (default 9000; the key allows 10000 a day)")
+    p.add_argument("--interval", type=float, default=0.1, help="seconds to wait between calls")
+    p.set_defaults(func=cmd_enrich)
 
     p = sub.add_parser("status", help="show collection progress")
     p.set_defaults(func=cmd_status)

@@ -7,6 +7,8 @@ sources:
     schema: raw
     tables:
       - name: nps_workplace_record
+      - name: fsc_corp_outline_page
+        description: Answers of the corporate outline API, one row per page of one asked name.
 
   - name: collected_meta
     description: Collection state kept by the collector.
@@ -14,3 +16,4 @@ sources:
     schema: meta
     tables:
       - name: publication
+      - name: fsc_query

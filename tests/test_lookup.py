@@ -1,9 +1,9 @@
 import re
 from datetime import date
-from pathlib import Path
 
 import duckdb
 import pytest
+from conftest import register_functions
 
 from company_signal.lookup import (
     browse,
@@ -22,15 +22,11 @@ from company_signal.lookup import (
     shown_rate,
 )
 
-MACRO_FILE = Path(__file__).parent.parent / "transform" / "macros" / "create_functions.sql"
-
-
 @pytest.fixture
 def warehouse():
     """A tiny warehouse with the real normalize_name definition from the dbt project."""
     con = duckdb.connect()
-    body = re.search(r"{% macro create_functions\(\) %}(.*){% endmacro %}", MACRO_FILE.read_text(), re.S)[1]
-    con.execute(body)
+    register_functions(con)
     con.execute("create schema mart")
     con.execute(
         """

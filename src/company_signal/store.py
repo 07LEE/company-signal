@@ -41,6 +41,24 @@ CREATE TABLE IF NOT EXISTS meta.page_fetch (
     PRIMARY KEY (publication_id, page)
 );
 
+-- One row per company name asked of the corporate outline API. A name that
+-- matched nothing is recorded too, so it is not asked again.
+CREATE TABLE IF NOT EXISTS meta.fsc_query (
+    query_name    VARCHAR PRIMARY KEY,
+    total_count   INTEGER NOT NULL,
+    pages_fetched INTEGER NOT NULL,
+    truncated     BOOLEAN NOT NULL,   -- more matches than the pages that were fetched
+    fetched_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- The responses to those questions, the text exactly as received.
+CREATE TABLE IF NOT EXISTS raw.fsc_corp_outline_page (
+    query_name VARCHAR NOT NULL,
+    page       INTEGER NOT NULL,
+    body       VARCHAR NOT NULL,
+    PRIMARY KEY (query_name, page)
+);
+
 -- Source records, kept as received. Column names differ by period, so they stay as JSON.
 CREATE TABLE IF NOT EXISTS raw.nps_workplace_record (
     publication_id VARCHAR NOT NULL,
@@ -209,3 +227,36 @@ class Store:
             total = con.execute("SELECT count(*) FROM meta.publication").fetchone()[0]
             rows = con.execute("SELECT count(*) FROM raw.nps_workplace_record").fetchone()[0]
         return total, rows
+
+    def fsc_queried_names(self) -> set[str]:
+        with self.connect() as con:
+            return {row[0] for row in con.execute("SELECT query_name FROM meta.fsc_query").fetchall()}
+
+    def record_fsc_response(self, query_name: str, pages: list[str], total_count: int, truncated: bool) -> None:
+        """Store every page of one name's answer, replacing an earlier answer to the same name."""
+        with self.connect() as con:
+            con.execute("BEGIN")
+            try:
+                con.execute("DELETE FROM raw.fsc_corp_outline_page WHERE query_name = ?", [query_name])
+                con.executemany(
+                    "INSERT INTO raw.fsc_corp_outline_page (query_name, page, body) VALUES (?, ?, ?)",
+                    [(query_name, number, body) for number, body in enumerate(pages, 1)],
+                )
+                con.execute(
+                    """
+                    INSERT OR REPLACE INTO meta.fsc_query (query_name, total_count, pages_fetched, truncated)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    [query_name, total_count, len(pages), truncated],
+                )
+                con.execute("COMMIT")
+            except Exception:
+                con.execute("ROLLBACK")
+                raise
+
+    def fsc_counts(self) -> tuple[int, int, int]:
+        """(names asked, names with at least one match, names whose answer was truncated)."""
+        with self.connect() as con:
+            return con.execute(
+                "SELECT count(*), count(*) FILTER (WHERE total_count > 0), count(*) FILTER (WHERE truncated) FROM meta.fsc_query"
+            ).fetchone()
