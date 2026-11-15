@@ -20,7 +20,9 @@ with selected as (
 
 deduplicated as (
 
-    -- Rows identical in every field are the same record received twice.
+    -- The source lists a few records twice, 0 to 3 a month, mostly construction
+    -- sites with no subscribers. They are not a paging artifact: the two copies
+    -- sit at fixed positions pages apart, and refetched pages are byte-identical.
     select distinct * exclude (page, row_no)
     from selected
 

@@ -166,3 +166,22 @@ def test_detail_notes_merged_rows_and_departed_workplaces():
     assert "several source rows" in text
     assert "Not in the latest data. Last seen 2026-07" in text
     assert "31.0%" in text
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("（주）한빛", "한빛"),
+        ("주식회사\u3000한빛", "한빛"),
+        ("한빛㈜", "한빛"),
+        ("(유한)한빛", "한빛"),
+        ("한빛 유한책임회사", "한빛"),
+        ("한빛(합자)", "한빛"),
+        ("ｈａｎｂｉｔ", "HANBIT"),
+        # Bracketed text can tell units apart, so it stays.
+        ("(주)한빛(Hanbit Inc.)", "한빛(HANBITINC.)"),
+        ("한빛건설(주)/일용/신축공사(2BL)", "한빛건설/일용/신축공사(2BL)"),
+    ],
+)
+def test_normalize_name(warehouse, name, expected):
+    assert warehouse.execute("select normalize_name(?)", [name]).fetchone()[0] == expected
