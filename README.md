@@ -6,7 +6,7 @@ The numbers come from the National Pension Service workplace data on the Korean 
 
 ## Quick start
 
-You need Python 3.11 or later and a free API key for dataset 15083277 on [data.go.kr](https://www.data.go.kr/data/15083277/fileData.do).
+You need Python 3.11 or later and a free API key from [data.go.kr](https://www.data.go.kr) for the pension dataset [15083277](https://www.data.go.kr/data/15083277/fileData.do). Apply for the corporate outline dataset [15043184](https://www.data.go.kr/data/15043184/openapi.do) with the same account to see company details.
 
 ```bash
 # 1. Install
@@ -15,19 +15,23 @@ pip install -e .
 # 2. Put the URL-encoded key from the portal in a .env file
 echo "ODCLOUD_SERVICE_KEY_ENCODED=your-url-encoded-key" > .env
 
-# 3. Download the 13 newest monthly publications (about 11 minutes each)
-company-signal collect
-
-# 4. Build the lookup tables
-dbt build --project-dir transform --profiles-dir transform
-
-# 5. Search by name, then type a number to open a workplace
+# 3. Search by name, then type a number to open a workplace
 company-signal search 한빛
 ```
 
-The download can be interrupted. Run `company-signal collect` again and it resumes where it stopped. After a new publication has been downloaded, run step 4 again to include it.
+With nothing collected, the search asks the pension API directly: the latest month by name, then the earlier months of the workplace you pick. Answers are stored, so asking again costs no calls.
 
-An opened workplace can be paged by month and switched to a yearly report or a summary of the whole period; the keys are shown on screen. Each command lists its options with `--help`.
+To search the whole data locally instead, collect it and build the lookup tables:
+
+```bash
+company-signal collect      # the 13 newest monthly publications, about 11 minutes each
+company-signal enrich       # company details for the largest workplaces (optional)
+dbt build --project-dir transform --profiles-dir transform
+```
+
+The download can be interrupted. Run `company-signal collect` again and it resumes where it stopped. After new data has been downloaded, run the build again to include it.
+
+An opened workplace can be paged by month and switched to a yearly report, a summary of the whole period, or the company's own disclosure; the keys are shown on screen. Each command lists its options with `--help`.
 
 ## Example
 
@@ -51,7 +55,7 @@ Monthly history (2026-08 to 2026-09, 2 of 32 months)
   month    subscribers  joined   left   join %  leave %   est. income
   2026-08          118       4      2     3.4%     1.7%     3,820,000
   2026-09          120       3      1     2.5%     0.8%     3,850,000
-[<] older  [>] newer  [a] all  [y] yearly  [s] summary  [q] quit:
+[<] older  [>] newer  [a] all  [y] yearly  [s] summary  [d] company  [q] quit:
 ```
 
 ## Notes
@@ -62,3 +66,4 @@ Monthly history (2026-08 to 2026-09, 2 of 32 months)
 - The implied tenure in the summary is 1 / attrition, an estimate and not a measured tenure.
 - Rates are hidden below 5 staff, and a rate over a span needs every month of that span.
 - The source has no workplace identifier, so a workplace that changes its name appears as a new one.
+- Company details are what the corporation reports about itself, for the whole company. They are shown only for a head office whose name and business number match one corporation.
