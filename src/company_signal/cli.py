@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 from contextlib import closing, nullcontext
-from datetime import date
+from datetime import date, datetime
 
 import duckdb
 
@@ -110,6 +110,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         return 0
     store = Store(settings.db_path)
     known, rows = store.counts()
+    print(build_note(settings, store))
     print(f"{known} publications known, {rows:,} raw records")
     print(f"{'published':<12}{'status':<13}{'fetched':>12}{'total':>12}{'pages':>11}  title")
     for title_date, status, total, fetched, pages, page_count, title in store.summary():
@@ -124,6 +125,22 @@ def cmd_status(args: argparse.Namespace) -> int:
     if asked:
         print(f"company disclosures: {asked:,} names asked, {matched:,} with a match, {truncated:,} truncated")
     return 0
+
+
+def build_note(settings: Settings, store: Store) -> str:
+    """When the lookup tables were built, and whether data has come in since."""
+    if not settings.warehouse_path.exists():
+        return "lookup tables: not built yet. Run company-signal update."
+    # Only dbt writes the warehouse; the lookup opens it read-only.
+    built_at = datetime.fromtimestamp(settings.warehouse_path.stat().st_mtime).astimezone()
+    publications, answers = store.added_since(built_at)
+    note = f"lookup tables: built {built_at:%Y-%m-%d %H:%M}"
+    if not publications and not answers:
+        return note + ", up to date"
+    return note + (
+        f"; since then {publications:,} publications completed and {answers:,} disclosure answers stored."
+        " Run company-signal update to include them."
+    )
 
 
 def month_count(text: str) -> int | None:

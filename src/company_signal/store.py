@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import time
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 
 import duckdb
@@ -337,6 +338,18 @@ class Store:
                 "SELECT body FROM raw.fsc_corp_outline_page WHERE query_name = ? ORDER BY page", [query_name]
             ).fetchall()
         return [row[0] for row in rows]
+
+    def added_since(self, moment: datetime) -> tuple[int, int]:
+        """(publications completed, company disclosure answers stored) after `moment`."""
+        with self.connect() as con:
+            publications = con.execute(
+                "SELECT count(*) FROM meta.publication WHERE completed_at > ?", [moment]
+            ).fetchone()[0]
+            try:
+                answers = con.execute("SELECT count(*) FROM meta.fsc_query WHERE fetched_at > ?", [moment]).fetchone()[0]
+            except duckdb.CatalogException:
+                answers = 0  # a database made before company disclosures were collected
+        return publications, answers
 
     def fsc_counts(self) -> tuple[int, int, int]:
         """(names asked, names with at least one match, names whose answer was truncated)."""
