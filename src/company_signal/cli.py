@@ -32,6 +32,7 @@ from .lookup import (
     pick_months,
     search,
 )
+from .pipeline import StepFailed, Steps, run_dbt, update
 from .store import Store
 
 
@@ -69,6 +70,36 @@ def cmd_enrich(args: argparse.Namespace) -> int:
         return 130
     finally:
         client.close()
+    return 0
+
+
+def cmd_update(args: argparse.Namespace) -> int:
+    settings = load_settings()
+    nps = Client(settings.service_key)
+    fsc = FscClient(settings.service_key)
+    store = Store(settings.db_path)
+    steps = Steps(
+        collect=lambda: collect(nps, store, settings.raw_dir, args.months, workers=args.workers),
+        enrich=lambda: enrich(fsc, store, settings.warehouse_path, args.max_calls),
+        build=lambda select: run_dbt(settings.root / "transform", settings.data_dir, select),
+        warehouse_exists=settings.warehouse_path.exists,
+    )
+    try:
+        summary = update(steps, force_build=args.force_build)
+    except StepFailed as exc:
+        print("\nUpdate stopped. Run the same command again to resume.", file=sys.stderr)
+        for line in exc.args[0]:
+            print(f"  {line}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("\nInterrupted. Run the same command again to resume.", file=sys.stderr)
+        return 130
+    finally:
+        nps.close()
+        fsc.close()
+    print("\nUpdate done.")
+    for line in summary:
+        print(f"  {line}")
     return 0
 
 
@@ -275,6 +306,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-calls", type=int, default=9000, help="API calls to spend in this run (default 9000; the key allows 10000 a day)")
     p.add_argument("--interval", type=float, default=0.1, help="seconds to wait between calls")
     p.set_defaults(func=cmd_enrich)
+
+    p = sub.add_parser("update", help="collect, build, add company disclosures and build again, skipping what has nothing new")
+    p.add_argument("--months", type=int, default=13, help="newest publications to keep collected (default 13)")
+    p.add_argument("--workers", type=positive_int, default=8, help="pages requested at once (default 8)")
+    p.add_argument("--max-calls", type=int, default=9000, help="disclosure API calls to spend (default 9000)")
+    p.add_argument("--force-build", action="store_true", help="build even when no new publication was completed")
+    p.set_defaults(func=cmd_update)
 
     p = sub.add_parser("status", help="show collection progress")
     p.set_defaults(func=cmd_status)
