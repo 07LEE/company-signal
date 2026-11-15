@@ -21,15 +21,13 @@ company-signal search 한빛
 
 With nothing collected, the search asks the pension API directly: the latest month by name, then the earlier months of the workplace you pick. Answers are stored, so asking again costs no calls.
 
-To search the whole data locally instead, collect it and build the lookup tables:
+To search the whole data locally instead, collect it and build the lookup tables from the repository root:
 
 ```bash
-company-signal collect      # the 13 newest monthly publications, about 11 minutes each
-company-signal enrich       # company details for the largest workplaces (optional)
-dbt build --project-dir transform --profiles-dir transform
+company-signal update       # the 13 newest monthly publications, about 3 minutes each
 ```
 
-The download can be interrupted. Run `company-signal collect` again and it resumes where it stopped. After new data has been downloaded, run the build again to include it.
+This runs `collect`, the dbt build, `enrich` (company details, up to the daily API limit) and a build of the company details, in that order. A build is skipped when there is nothing new. Every step can be interrupted and resumes when the command is run again, so running it daily keeps the data current. `--months 132` collects the whole history since 2015.
 
 An opened workplace can be paged by month and switched to a yearly report, a summary of the whole period, or the company's own disclosure; the keys are shown on screen. Each command lists its options with `--help`.
 
