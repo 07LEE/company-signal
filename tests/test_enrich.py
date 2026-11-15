@@ -6,7 +6,7 @@ import pytest
 from conftest import register_functions
 
 from company_signal.api import FetchError
-from company_signal.enrich import candidate_names, enrich
+from company_signal.enrich import EnrichResult, candidate_names, enrich
 from company_signal.fsc import DailyLimitReached, FscClient
 from company_signal.store import Store
 
@@ -87,12 +87,13 @@ def test_enrich_stores_answers_including_no_match_and_does_not_ask_twice(tmp_pat
         return httpx.Response(200, text=outline(0 if name == "가람" else 14))
 
     store = Store(tmp_path / "collected.duckdb")
-    enrich(make_client(handler), store, warehouse, max_calls=100, log=lambda _: None)
+    result = enrich(make_client(handler), store, warehouse, max_calls=100, log=lambda _: None)
+    assert result == EnrichResult(names_asked=2, calls=2, names_left=0, limit_reached=False)
     assert asked == [("가람", 1), ("한빛소프트", 1)]
     assert store.fsc_counts() == (2, 1, 0)  # asked, matched, truncated
 
     asked.clear()
-    enrich(make_client(handler), store, warehouse, max_calls=100, log=lambda _: None)
+    assert enrich(make_client(handler), store, warehouse, max_calls=100, log=lambda _: None).names_asked == 0
     assert asked == []
 
     with store.connect() as con:
@@ -129,6 +130,7 @@ def test_enrich_keeps_what_it_has_when_the_daily_limit_is_reached(tmp_path, ware
 
     store = Store(tmp_path / "collected.duckdb")
     logs = []
-    enrich(make_client(handler), store, warehouse, max_calls=100, log=logs.append)
+    result = enrich(make_client(handler), store, warehouse, max_calls=100, log=logs.append)
+    assert result.limit_reached and result.names_asked == 1
     assert store.fsc_counts() == (1, 1, 0)
     assert any("daily limit" in line for line in logs)

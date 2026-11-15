@@ -10,7 +10,7 @@ import httpx
 import pytest
 
 from company_signal.api import Client, FetchError, Publication, parse_title_date
-from company_signal.collect import collect_publication, pick_recent
+from company_signal.collect import CollectResult, PublicationResult, collect, collect_publication, pick_recent
 from company_signal.store import Store
 
 
@@ -75,7 +75,8 @@ def test_collect_resumes_and_completes(tmp_path):
     # A second run does not refetch recorded pages and finishes the rest.
     fail_on_page.clear()
     calls.clear()
-    assert collect_publication(make_client(handler), store, tmp_path / "raw", pub, log=logs.append)
+    result = collect_publication(make_client(handler), store, tmp_path / "raw", pub, log=logs.append)
+    assert result == PublicationResult(complete=True, pages_fetched=1)
     assert calls == [3]
     assert store.status_of("uddi:test") == "complete"
     assert store.counts() == (1, total)
@@ -127,7 +128,7 @@ def test_pages_are_requested_at_once_and_written_by_one_thread(tmp_path):
     assert store.status_of("uddi:test") == "in_progress"
 
     fail = False
-    assert collect_publication(make_client(handler), store, tmp_path / "raw", pub, log=lambda _: None, workers=4)
+    assert collect_publication(make_client(handler), store, tmp_path / "raw", pub, log=lambda _: None, workers=4).complete
     assert store.fetched_pages("uddi:test") == set(range(1, 10))
     assert store.counts() == (1, total)
     assert most_in_flight > 1
@@ -177,3 +178,21 @@ def test_connect_waits_for_another_process_to_release_the_file(tmp_path):
         assert Store(db_path, lock_wait=30).counts() == (0, 0)
     finally:
         proc.wait()
+
+
+
+def test_collect_reports_what_this_run_added(tmp_path):
+    """A second run over the same publications adds nothing, which tells a caller there is nothing to rebuild."""
+    spec = {"paths": {"/15083277/v1/uddi:a": {"get": {"summary": "시험_20261022"}},
+                      "/15083277/v1/uddi:b": {"get": {"summary": "시험_20260923"}}}}
+
+    def handler(request):
+        if "oas/docs" in str(request.url):
+            return httpx.Response(200, json=spec)
+        return httpx.Response(200, text=page_body(int(request.url.params["page"]), 1500))
+
+    store = Store(tmp_path / "t.duckdb")
+    first = collect(make_client(handler), store, tmp_path / "raw", months=2, log=lambda _: None)
+    assert first == CollectResult(publications_completed=2, pages_fetched=4)
+    again = collect(make_client(handler), store, tmp_path / "raw", months=2, log=lambda _: None)
+    assert again == CollectResult(publications_completed=0, pages_fetched=0)

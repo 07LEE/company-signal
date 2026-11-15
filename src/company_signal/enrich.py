@@ -8,6 +8,7 @@ Which response belongs to which workplace is decided later, in dbt.
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from pathlib import Path
 
 import duckdb
@@ -59,7 +60,15 @@ def fetch_name(client: FscClient, name: str, calls_left: int) -> tuple[list[str]
     return pages, total, total > len(pages) * ROWS_PER_PAGE
 
 
-def enrich(client: FscClient, store: Store, warehouse_path: Path, max_calls: int, log=print) -> None:
+@dataclass(frozen=True)
+class EnrichResult:
+    names_asked: int
+    calls: int
+    names_left: int
+    limit_reached: bool  # the key's daily limit, not --max-calls
+
+
+def enrich(client: FscClient, store: Store, warehouse_path: Path, max_calls: int, log=print) -> EnrichResult:
     store.init()
     names = candidate_names(warehouse_path)
     done = store.fsc_queried_names()
@@ -67,6 +76,7 @@ def enrich(client: FscClient, store: Store, warehouse_path: Path, max_calls: int
     log(f"{len(names):,} company names to ask about, {len(names) - len(todo):,} already asked, {len(todo):,} left")
 
     calls = asked = 0
+    limit_reached = False
     for name in todo:
         if calls >= max_calls:
             break
@@ -74,6 +84,7 @@ def enrich(client: FscClient, store: Store, warehouse_path: Path, max_calls: int
             result = fetch_name(client, name, max_calls - calls)
         except DailyLimitReached:
             log("The API key's daily limit is used up.")
+            limit_reached = True
             break
         if result is None:
             break
@@ -84,3 +95,4 @@ def enrich(client: FscClient, store: Store, warehouse_path: Path, max_calls: int
         if asked % 500 == 0:
             log(f"  {asked:,} names, {calls:,} calls")
     log(f"Asked about {asked:,} names with {calls:,} calls. {len(todo) - asked:,} names left; run again to continue.")
+    return EnrichResult(names_asked=asked, calls=calls, names_left=len(todo) - asked, limit_reached=limit_reached)

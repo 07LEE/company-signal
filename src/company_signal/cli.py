@@ -266,8 +266,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--workers",
         type=positive_int,
-        default=4,
-        help="pages requested at once (default 4; more than 8 was no faster when tried)",
+        default=8,
+        help="pages requested at once (default 8; more was no faster when tried)",
     )
     p.set_defaults(func=cmd_collect)
 
