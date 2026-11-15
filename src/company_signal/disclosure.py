@@ -11,15 +11,12 @@ for this one workplace.
 
 from __future__ import annotations
 
-from contextlib import closing
-from pathlib import Path
-
 import duckdb
 
 from .api import FetchError
 from .enrich import MAX_PAGES_PER_NAME, fetch_name
 from .fsc import DailyLimitReached, FscClient
-from .lookup import LookupFailed, open_warehouse
+from .lookup import LookupFailed
 from .store import Store
 
 ELIGIBILITY_SQL = """
@@ -55,8 +52,12 @@ def company_from_answer(con: duckdb.DuckDBPyConnection, workplace_id: str, query
     return dict(zip([d[0] for d in cursor.description], row)) if row else None
 
 
-def company_loader(warehouse: Path, store: Store, service_key: str, workplace_id: str, query_name: str, pages: list[str] | None):
-    """A function that gives the company when called; it asks the API only if `pages` is None."""
+def company_loader(connect, store: Store, service_key: str, workplace_id: str, query_name: str, pages: list[str] | None):
+    """A function that gives the company when called; it asks the API only if `pages` is None.
+
+    `connect` gives a context manager for the connection that holds the
+    workplace: the warehouse file, or the in-memory database of a live lookup.
+    """
 
     def load() -> dict | None:
         answer = pages
@@ -76,7 +77,7 @@ def company_loader(warehouse: Path, store: Store, service_key: str, workplace_id
                 store.record_fsc_response(query_name, answer, total, truncated)
             except duckdb.Error:
                 pass  # storing only saves asking again next time; the answer is still shown
-        with closing(open_warehouse(warehouse)) as con:
+        with connect() as con:
             return company_from_answer(con, workplace_id, query_name, answer)
 
     return load

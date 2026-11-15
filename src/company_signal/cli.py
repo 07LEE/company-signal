@@ -113,20 +113,24 @@ def month(text: str) -> date:
         raise argparse.ArgumentTypeError("give a month as YYYY-MM, for example 2025-03") from None
 
 
-def company_for_untied(settings: Settings, workplace_id: str, query_name: str):
+def company_for_untied(settings: Settings, workplace_id: str, query_name: str, connect=None):
     """For a workplace the warehouse has not tied: the company, a loader, or None.
 
     An answer already collected for its name is used straight away; it may be
     newer than the last dbt build. Without one, the workplace gets a loader that
     asks the API when the user opens the company view, if there is a key to ask with.
+    `connect` gives the connection that holds the workplace; by default the warehouse.
     """
+    if connect is None:
+        def connect():
+            return closing(open_warehouse(settings.warehouse_path))
     store = Store(settings.db_path)
     pages = store.fsc_pages(query_name) if settings.db_path.exists() else None
     if pages is not None:
-        with closing(open_warehouse(settings.warehouse_path)) as con:
+        with connect() as con:
             return company_from_answer(con, workplace_id, query_name, pages)
     if settings.service_key:
-        return company_loader(settings.warehouse_path, store, settings.service_key, workplace_id, query_name, None)
+        return company_loader(connect, store, settings.service_key, workplace_id, query_name, None)
     return None
 
 
@@ -213,9 +217,11 @@ def cmd_search(args: argparse.Namespace) -> int:
             years = load_years(con, selected.workplace_id)
             overall = load_overall(con, selected.workplace_id)
             company = load_company(con, selected.workplace_id)
-            query_name = None if company or live else query_name_if_askable(con, selected.workplace_id)
+            query_name = None if company else query_name_if_askable(con, selected.workplace_id)
         if query_name:
-            company = company_for_untied(settings, selected.workplace_id, query_name)
+            # A live lookup's workplace is in its in-memory database, not in the warehouse.
+            connect = (lambda: nullcontext(live.con)) if live else None
+            company = company_for_untied(settings, selected.workplace_id, query_name, connect)
         shown = pick_months(months, last=args.months, start=args.start, end=args.end)
         print()
         print(format_summary(workplace, months))

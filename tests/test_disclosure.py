@@ -1,4 +1,5 @@
 import json
+from contextlib import closing
 from datetime import date
 
 import duckdb
@@ -102,7 +103,7 @@ def test_the_loader_asks_once_and_stores_the_answer(tmp_path, warehouse, monkeyp
     real_init = FscClient.__init__
     monkeypatch.setattr(FscClient, "__init__", lambda self, key, **kw: real_init(self, key, interval=0, sleep=lambda _: None, transport=fsc_transport(calls, body)))
     store = Store(tmp_path / "data" / "company_signal.duckdb")
-    load = company_loader(warehouse, store, "k", "w1", "한빛", None)
+    load = company_loader(lambda: closing(duckdb.connect(str(warehouse), read_only=True)), store, "k", "w1", "한빛", None)
     assert load()["crno"] == "c1"
     assert calls == ["한빛"]
     assert store.fsc_pages("한빛") == [body]  # the next dbt build includes it
@@ -153,3 +154,26 @@ def test_browse_erases_the_lookup_line_too(capsys):
     browse(months, months[-3:], company=lambda: None, ask=lambda prompt: next(keys), in_place=True, terminal_size=lambda: (120, 50))
     # Three months take 5 rows, then a blank line, the prompt and the lookup line.
     assert "\x1b[8F\x1b[J" in capsys.readouterr().out
+
+
+def test_a_live_lookup_ties_the_company_in_its_own_database(tmp_path, monkeypatch):
+    """No warehouse file at all: the workplace is only in the live lookup's in-memory database."""
+    from contextlib import nullcontext
+
+    from company_signal.sqlfunctions import register_functions as register
+
+    live = duckdb.connect()
+    register(live)
+    live.execute("create schema mart")
+    live.execute("create table mart.mart_workplace as select 'w1' as workplace_id, '한빛(주)' as workplace_name, '한빛' as name_norm, '123810' as biz_reg_no6, '1' as workplace_type_code")
+    assert query_name_if_askable(live, "w1") == "한빛"
+
+    body = answer(corp("c1", "1238100001"))
+    calls = []
+    real_init = FscClient.__init__
+    monkeypatch.setattr(FscClient, "__init__", lambda self, key, **kw: real_init(self, key, interval=0, sleep=lambda _: None, transport=fsc_transport(calls, body)))
+    settings = Settings(root=tmp_path, service_key="k")
+    assert not settings.warehouse_path.exists()
+    load = company_for_untied(settings, "w1", "한빛", lambda: nullcontext(live))
+    assert callable(load) and load()["crno"] == "c1"
+    assert calls == ["한빛"]
