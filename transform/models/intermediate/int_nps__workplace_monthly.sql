@@ -10,6 +10,10 @@
 -- the same month (about 0.02% of rows) are units the data cannot tell apart;
 -- they are summed and counted in source_row_count.
 --
+-- A workplace that renames itself is kept as one when the new key starts the
+-- month after the old one stopped, with the same 6 digits, joining date, type
+-- and name apart from a bracketed English name or a legal-form word.
+--
 -- The rules are in nps_workplace_months (src/company_signal/sql/functions.sql), which the
 -- lookup also uses.
 

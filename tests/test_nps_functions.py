@@ -48,3 +48,58 @@ def test_nps_known_column(con):
 @pytest.mark.parametrize(("month", "rate"), [(date(2025, 12, 1), 0.09), (date(2026, 1, 1), 0.095), (date(2015, 11, 1), 0.09)])
 def test_nps_contribution_rate(con, month, rate):
     assert con.execute("select nps_contribution_rate(?)", [month]).fetchone()[0] == rate
+
+
+def workplace_months(con, rows):
+    """nps_workplace_months over source rows given as (base month, name, 6 digits)."""
+    columns = nps_columns()
+    con.execute("create or replace table r (publication_id varchar, page integer, row_no integer, record json)")
+    for n, (month, name, digits) in enumerate(rows, 1):
+        record = record_in_period(0) | {columns["base_ym"][0]: month, columns["workplace_name"][0]: name, columns["biz_reg_no"][0]: digits}
+        con.execute("insert into r values (?, 1, ?, ?)", [f"p{month}", n, json.dumps(record, ensure_ascii=False)])
+    con.execute("create or replace table rows as select *, null::date as published_on from nps_record_rows('r')")
+    con.execute("create or replace table picked as from nps_selected_publications('rows')")
+    return con.execute(
+        "select strftime(base_ym, '%Y-%m'), workplace_name, workplace_id from nps_workplace_months('rows', 'picked') order by 1, 2"
+    ).fetchall()
+
+
+def test_a_renamed_workplace_carries_on_under_its_latest_key(con):
+    months = workplace_months(con, [
+        ("2024-02", "주식회사 한빛", 23810),
+        ("2024-03", "주식회사 한빛", 23810),
+        ("2024-04", "주식회사 한빛 ( Hanbit Inc. )", 23810),
+        ("2024-04", "한빛식품", 23810),  # another workplace with the same digits
+    ])
+    hanbit = {month: wid for month, name, wid in months if name.startswith("주식회사 한빛")}
+    assert len(set(hanbit.values())) == 1
+    latest = [wid for month, name, wid in months if name == "주식회사 한빛 ( Hanbit Inc. )"][0]
+    assert hanbit["2024-02"] == latest
+    assert len({wid for _, _, wid in months}) == 2
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        # Two units that differ only in their bracket stop and start together.
+        [("2024-03", "제일기업(HDC)", 23810), ("2024-03", "제일기업(HDO)", 23810),
+         ("2024-04", "제일기업(HCP)", 23810), ("2024-04", "제일기업(HSB)", 23810)],
+        # A month without either is not a carrying on.
+        [("2024-02", "한빛", 23810), ("2024-04", "한빛(HANBIT)", 23810)],
+        # Both present in the same month are two workplaces.
+        [("2024-03", "한빛", 23810), ("2024-03", "한빛(HANBIT)", 23810), ("2024-04", "한빛(HANBIT)", 23810)],
+        # A different name is a different workplace, whatever the digits.
+        [("2024-03", "한빛", 23810), ("2024-04", "가람", 23810)],
+        # Units told apart by Korean text in the bracket keep it in the name core.
+        [("2024-03", "영암군청(도시녹지관리원)", 23810), ("2024-04", "영암군청(산림자원조사단)", 23810)],
+    ],
+)
+def test_keys_that_may_be_different_workplaces_are_not_joined(con, rows):
+    months = workplace_months(con, rows)
+    assert len({wid for _, _, wid in months}) == len({name for _, name, _ in months})
+
+
+def test_nps_name_core(con):
+    assert con.execute(
+        "select nps_name_core('한빛로보틱스(HANBITROBOTICSINC.)'), nps_name_core('농업회사법인열정농산'), nps_name_core('영암군청(2025년녹지관리)')"
+    ).fetchone() == ("한빛로보틱스", "열정농산", "영암군청(2025년녹지관리)")

@@ -38,6 +38,14 @@ create or replace macro normalize_name(name) as
     )
 ;
 
+-- nps_name_core: the part of a normalized name that a renaming keeps. Bracketed
+-- Latin text, usually the company's English name, is left out, as are a few
+-- legal-form words that companies add or drop. Used only to join a workplace
+-- that renamed itself to its earlier key, never as a key, since brackets also
+-- tell apart units that exist side by side.
+create or replace macro nps_name_core(name_norm) as
+    regexp_replace(name_norm, '\([A-Z0-9.,&''\-]*[A-Z][A-Z0-9.,&''\-]*\)|농업회사법인|영농조합법인', '', 'g');
+
 -- fsc_query_name: the text to search the corporate outline API with.
 -- The API matches on the plain company name, and a bracketed addition such as
 -- an English name makes it find nothing. A wrong match is ruled out later by
@@ -207,10 +215,16 @@ create or replace macro fsc_ties(workplace_table, item_table) as table
 -- the same month (about 0.02% of rows) are units the data cannot tell apart;
 -- they are summed and counted in source_row_count.
 --
+-- A workplace that renames itself gets a new key. When the new key carries on
+-- exactly where the old one stopped, the two are joined into one workplace
+-- (see nps_name_core and the successions step below), under the key of the
+-- latest stretch. The latest key is used so a workplace chosen from the latest
+-- month keeps its key when earlier months are added.
+--
 -- row_table has the rows of nps_record_rows plus published_on; selected_table
 -- has (publication_id, base_ym) of the publication chosen for each month.
 create or replace macro nps_workplace_months(row_table, selected_table) as table
-    with selected as (
+    with recursive selected as (
 
         select r.*
         from query_table(row_table) as r
@@ -235,30 +249,88 @@ create or replace macro nps_workplace_months(row_table, selected_table) as table
             normalize_name(workplace_name) as name_norm
         from deduplicated
 
+    ),
+
+    by_key as (
+
+        select
+            md5(concat_ws('|', biz_reg_no6, name_norm, coalesce(applied_on::varchar, ''))) as workplace_id,
+            base_ym,
+            arg_max(workplace_name, subscriber_count) as workplace_name,
+            name_norm,
+            biz_reg_no6,
+            applied_on,
+            arg_max(legal_dong_code, subscriber_count) as legal_dong_code,
+            min(join_status_code) as join_status_code,
+            arg_max(workplace_type_code, subscriber_count) as workplace_type_code,
+            arg_max(road_address, subscriber_count) as road_address,
+            arg_max(lot_address, subscriber_count) as lot_address,
+            arg_max(industry_code, subscriber_count) as industry_code,
+            arg_max(industry_name, subscriber_count) as industry_name,
+            max(withdrawn_on) as withdrawn_on,
+            sum(subscriber_count)::integer as subscriber_count,
+            sum(billed_amount)::bigint as billed_amount,
+            sum(new_subscriber_count)::integer as new_subscriber_count,
+            sum(lost_subscriber_count)::integer as lost_subscriber_count,
+            count(*)::integer as source_row_count
+        from keyed
+        group by base_ym, biz_reg_no6, name_norm, applied_on
+
+    ),
+
+    stretch as (
+
+        -- The months each key covers.
+        select
+            workplace_id,
+            any_value(biz_reg_no6) as biz_reg_no6,
+            any_value(applied_on) as applied_on,
+            nps_name_core(any_value(name_norm)) as name_core,
+            arg_max(workplace_type_code, base_ym) as workplace_type_code,
+            min(base_ym) as first_base_ym,
+            max(base_ym) as last_base_ym
+        from by_key
+        group by workplace_id
+
+    ),
+
+    successions as (
+
+        -- A later key carries on an earlier one when it has the same 6 digits,
+        -- joining date, type and name core, and starts the month after the
+        -- earlier one stopped, so the two never exist in the same month. Only a
+        -- pair with no other candidate on either side is joined: units that
+        -- differ only in their bracket, such as "(HDC)" and "(HDO)", often stop
+        -- and start together.
+        select earlier.workplace_id as earlier_id, later.workplace_id as later_id
+        from stretch as earlier
+        inner join stretch as later
+            on later.biz_reg_no6 = earlier.biz_reg_no6
+            and later.applied_on = earlier.applied_on
+            and later.workplace_type_code = earlier.workplace_type_code
+            and later.name_core = earlier.name_core
+            and later.first_base_ym = earlier.last_base_ym + interval 1 month
+        qualify count(*) over (partition by earlier.workplace_id) = 1
+            and count(*) over (partition by later.workplace_id) = 1
+
+    ),
+
+    lineage as (
+
+        -- Each key with the key of the latest stretch it leads to.
+        select workplace_id, workplace_id as latest_id
+        from stretch
+        where workplace_id not in (select earlier_id from successions)
+        union all
+        select s.earlier_id, l.latest_id
+        from lineage as l
+        inner join successions as s on s.later_id = l.workplace_id
+
     )
 
-    select
-        md5(concat_ws('|', biz_reg_no6, name_norm, coalesce(applied_on::varchar, ''))) as workplace_id,
-        base_ym,
-        arg_max(workplace_name, subscriber_count) as workplace_name,
-        name_norm,
-        biz_reg_no6,
-        applied_on,
-        arg_max(legal_dong_code, subscriber_count) as legal_dong_code,
-        min(join_status_code) as join_status_code,
-        arg_max(workplace_type_code, subscriber_count) as workplace_type_code,
-        arg_max(road_address, subscriber_count) as road_address,
-        arg_max(lot_address, subscriber_count) as lot_address,
-        arg_max(industry_code, subscriber_count) as industry_code,
-        arg_max(industry_name, subscriber_count) as industry_name,
-        max(withdrawn_on) as withdrawn_on,
-        sum(subscriber_count)::integer as subscriber_count,
-        sum(billed_amount)::bigint as billed_amount,
-        sum(new_subscriber_count)::integer as new_subscriber_count,
-        sum(lost_subscriber_count)::integer as lost_subscriber_count,
-        count(*)::integer as source_row_count
-    from keyed
-    group by base_ym, biz_reg_no6, name_norm, applied_on;
+    select l.latest_id as workplace_id, k.* exclude (workplace_id)
+    from by_key as k
+    inner join lineage as l using (workplace_id);
 
 -- nps_monthly: Monthly indicators per workplace.
 --
