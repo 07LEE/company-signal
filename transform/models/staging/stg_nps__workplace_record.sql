@@ -13,5 +13,5 @@ with publication as (
 )
 
 select n.publication_id, p.published_on, n.* exclude (publication_id)
-from nps_record_rows('{{ source("collected_raw", "nps_workplace_record") }}') as n
+from nps_record_rows('{{ ref("base_nps__page_record") }}') as n
 inner join publication as p using (publication_id)

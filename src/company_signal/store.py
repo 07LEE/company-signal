@@ -85,13 +85,10 @@ CREATE TABLE IF NOT EXISTS raw.nps_live_page (
     PRIMARY KEY (publication_id, column_name, operator, value, page)
 );
 
--- Source records, kept as received. Column names differ by period, so they stay as JSON.
-CREATE TABLE IF NOT EXISTS raw.nps_workplace_record (
-    publication_id VARCHAR NOT NULL,
-    page           INTEGER NOT NULL,
-    row_no         INTEGER NOT NULL,
-    record         JSON NOT NULL
-);
+-- The pension records themselves are not kept here. Each page stays in the
+-- gzip file it was saved to, exactly as received, and dbt reads the files
+-- (nps_file_records). A database made before this still holds a copy in
+-- raw.nps_workplace_record until it is compacted.
 """
 
 
@@ -168,44 +165,17 @@ class Store:
                 [total_count, page_count, publication_id],
             )
 
-    def record_page(self, publication_id: str, page: int, sha256: str, file_path: Path) -> int:
-        """Load a saved page file into the raw table and mark the page as fetched.
-
-        Existing rows of the page are deleted first, so loading the same page
-        again gives the same result.
-        """
+    def record_page(self, publication_id: str, page: int, sha256: str, file_path: Path, row_count: int) -> None:
+        """Mark a saved page file as fetched. Recording the same page again replaces the record."""
         with self.connect() as con:
-            con.execute("BEGIN")
-            try:
-                con.execute(
-                    "DELETE FROM raw.nps_workplace_record WHERE publication_id = ? AND page = ?",
-                    [publication_id, page],
-                )
-                con.execute(
-                    """
-                    INSERT INTO raw.nps_workplace_record
-                    SELECT ?, ?, generate_subscripts(data, 1), unnest(data)
-                    FROM read_json(?, columns = {'data': 'JSON[]'}, maximum_object_size = 67108864)
-                    """,
-                    [publication_id, page, str(file_path)],
-                )
-                row_count = con.execute(
-                    "SELECT count(*) FROM raw.nps_workplace_record WHERE publication_id = ? AND page = ?",
-                    [publication_id, page],
-                ).fetchone()[0]
-                con.execute(
-                    """
-                    INSERT OR REPLACE INTO meta.page_fetch
-                        (publication_id, page, row_count, sha256, file_path)
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    [publication_id, page, row_count, sha256, str(file_path)],
-                )
-                con.execute("COMMIT")
-            except Exception:
-                con.execute("ROLLBACK")
-                raise
-        return row_count
+            con.execute(
+                """
+                INSERT OR REPLACE INTO meta.page_fetch
+                    (publication_id, page, row_count, sha256, file_path, fetched_at)
+                VALUES (?, ?, ?, ?, ?, now())
+                """,
+                [publication_id, page, row_count, sha256, str(file_path)],
+            )
 
     def try_complete(self, publication_id: str) -> tuple[bool, int, int]:
         """Mark complete only when fetched rows equal totalCount.
@@ -251,7 +221,7 @@ class Store:
     def counts(self) -> tuple[int, int]:
         with self.connect() as con:
             total = con.execute("SELECT count(*) FROM meta.publication").fetchone()[0]
-            rows = con.execute("SELECT count(*) FROM raw.nps_workplace_record").fetchone()[0]
+            rows = con.execute("SELECT coalesce(sum(row_count), 0) FROM meta.page_fetch").fetchone()[0]
         return total, rows
 
     def fsc_queried_names(self) -> set[str]:

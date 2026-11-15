@@ -212,6 +212,19 @@ create or replace macro fsc_ties(workplace_table, item_table) as table
 -- The pension data. The dbt models run these over everything collected, and
 -- the lookup runs them over the rows it fetched for one workplace.
 
+-- nps_file_records: the records in the page files the collector saved, in the
+-- shape nps_record_rows reads (publication_id, page, row_no, record). The files
+-- are the only copy of what the API sent; a page file is named
+-- <publication id with its : as _>/page-<number>.json.gz.
+create or replace macro nps_file_records(file_glob) as table
+    select
+        -- Only the first _ was a :, the one after the scheme; some ids have a _ of their own.
+        regexp_replace(split_part(filename, '/', -2), '_', ':') as publication_id,
+        regexp_extract(filename, 'page-(\d+)\.json\.gz$', 1)::integer as page,
+        generate_subscripts(data, 1) as row_no,
+        unnest(data) as record
+    from read_json(file_glob, columns = {'data': 'JSON[]'}, filename = true, maximum_object_size = 67108864);
+
 -- nps_workplace_months: One row per workplace and base month.
 --
 -- The source has no workplace key, and only the first 6 digits of the business

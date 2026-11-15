@@ -118,3 +118,18 @@ def test_a_renamed_workplace_lists_its_earlier_name(con):
     rows = dict(con.execute("select workplace_name, former_names from nps_workplaces('m', 'mm')").fetchall())
     assert rows["주식회사  한빛 ( Hanbit Inc. )"] == [{"name": "주식회사 한빛", "last_base_ym": date(2024, 3, 1)}]
     assert rows["가람"] is None
+
+
+def test_nps_file_records_reads_page_files_back_under_their_publication_id(con, tmp_path):
+    """A publication id can hold a _ of its own; only the one that replaced the : is turned back."""
+    import gzip
+
+    folder = tmp_path / "uddi_c6704217-b37b_201908281108"
+    folder.mkdir()
+    with gzip.open(folder / "page-000002.json.gz", "wb") as f:
+        f.write(json.dumps({"data": [{"사업장명": "한빛"}, {"사업장명": "가람"}]}, ensure_ascii=False).encode())
+    rows = con.execute(
+        "select publication_id, page, row_no, record->>'사업장명' from nps_file_records(?) order by row_no",
+        [str(tmp_path / "*" / "page-*.json.gz")],
+    ).fetchall()
+    assert rows == [("uddi:c6704217-b37b_201908281108", 2, 1, "한빛"), ("uddi:c6704217-b37b_201908281108", 2, 2, "가람")]

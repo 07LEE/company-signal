@@ -74,7 +74,7 @@ def collect_publication(
     def save(page: int, body: bytes) -> None:
         path = page_path(raw_dir, pid, page)
         write_atomic(path, body)
-        store.record_page(pid, page, hashlib.sha256(body).hexdigest(), path)
+        store.record_page(pid, page, hashlib.sha256(body).hexdigest(), path, len(json.loads(body)["data"]))
 
     # Page 1 tells the total row count. If already fetched, read it from the file.
     if 1 in done_pages:

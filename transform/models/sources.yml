@@ -2,11 +2,10 @@ version: 2
 
 sources:
   - name: collected_raw
-    description: Source records exactly as received from the API, one row per record.
+    description: API answers exactly as received. The pension records are read from the page files instead.
     database: collected
     schema: raw
     tables:
-      - name: nps_workplace_record
       - name: fsc_corp_outline_page
         description: Answers of the corporate outline API, one row per page of one asked name.
 

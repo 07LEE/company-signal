@@ -8,6 +8,7 @@ from datetime import date
 import duckdb
 import httpx
 import pytest
+from conftest import register_functions
 
 from company_signal.api import Client, FetchError, Publication, parse_title_date
 from company_signal.collect import CollectResult, PublicationResult, collect, collect_publication, pick_recent
@@ -81,11 +82,19 @@ def test_collect_resumes_and_completes(tmp_path):
     assert store.status_of("uddi:test") == "complete"
     assert store.counts() == (1, total)
 
+    # The records stay in the page files only, and read back as they were sent.
+    con = duckdb.connect()
+    register_functions(con, temporary=True)
+    row = con.execute(
+        "select record->>'사업장명' from nps_file_records(?) where page = 3 and row_no = 1",
+        [str(tmp_path / "raw" / "uddi_test" / "page-*.json.gz")],
+    ).fetchone()
+    assert row == ("회사2000",)
+    assert con.execute("select publication_id from nps_file_records(?) limit 1",
+                       [str(tmp_path / "raw" / "uddi_test" / "page-*.json.gz")]).fetchone() == ("uddi:test",)
+    con.close()
     with store.connect() as con:
-        row = con.execute(
-            "SELECT record->>'사업장명' FROM raw.nps_workplace_record WHERE page = 3 AND row_no = 1"
-        ).fetchone()
-    assert row[0] == "회사2000"
+        assert con.execute("select count(*) from information_schema.tables where table_name = 'nps_workplace_record'").fetchone() == (0,)
 
 
 
@@ -145,7 +154,7 @@ def test_record_page_is_idempotent(tmp_path):
     collect_publication(make_client(handler), store, tmp_path / "raw", pub, log=lambda _: None)
 
     path = tmp_path / "raw" / "uddi_test" / "page-000001.json.gz"
-    store.record_page("uddi:test", 1, "x", path)
+    store.record_page("uddi:test", 1, "x", path, 10)
     assert store.counts() == (1, 10)
 
 
