@@ -1,6 +1,9 @@
 import json
+import subprocess
+import sys
 from datetime import date
 
+import duckdb
 import httpx
 import pytest
 
@@ -103,3 +106,26 @@ def test_ok_response_without_data_is_retried_then_fails():
 
     with pytest.raises(FetchError):
         make_client(handler).fetch_page("uddi:test", 1)
+
+
+def hold_lock(db_path, seconds):
+    """Start another process that keeps the database file open for a while."""
+    code = "import duckdb, sys, time; c = duckdb.connect(sys.argv[1]); print('ready', flush=True); time.sleep(float(sys.argv[2]))"
+    proc = subprocess.Popen([sys.executable, "-c", code, str(db_path), str(seconds)], stdout=subprocess.PIPE, text=True)
+    assert proc.stdout.readline().strip() == "ready"
+    return proc
+
+
+def test_connect_waits_for_another_process_to_release_the_file(tmp_path):
+    db_path = tmp_path / "t.duckdb"
+    Store(db_path).init()
+
+    proc = hold_lock(db_path, 2)
+    try:
+        # Without waiting, the open fails while the other process holds the file.
+        with pytest.raises(duckdb.IOException):
+            Store(db_path, lock_wait=0).counts()
+        # With waiting, it succeeds once the other process is done.
+        assert Store(db_path, lock_wait=30).counts() == (0, 0)
+    finally:
+        proc.wait()

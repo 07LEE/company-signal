@@ -8,6 +8,7 @@ import sys
 from .api import Client, FetchError
 from .collect import collect
 from .config import load_settings
+from .lookup import WarehouseMissing, choose, format_detail, format_hits, load_detail, open_warehouse, search
 from .store import Store
 
 
@@ -45,6 +46,40 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_search(args: argparse.Namespace) -> int:
+    settings = load_settings(require_key=False)
+    try:
+        con = open_warehouse(settings.warehouse_path)
+    except WarehouseMissing as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    try:
+        name = args.name
+        if name is None:
+            if not sys.stdin.isatty():
+                print("Give a workplace name: company-signal search NAME", file=sys.stderr)
+                return 2
+            name = input("Workplace name: ").strip()
+            if not name:
+                return 0
+        hits, total = search(con, name, args.limit)
+        print(format_hits(hits, total, name))
+        # Piped output gets the list only; a person at a terminal gets to pick one.
+        if not sys.stdin.isatty():
+            return 0
+        selected = choose(hits)
+        if selected is None:
+            return 0
+        print()
+        print(format_detail(*load_detail(con, selected.workplace_id)))
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return 130
+    finally:
+        con.close()
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="company-signal")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -57,6 +92,11 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("status", help="show collection progress")
     p.set_defaults(func=cmd_status)
+
+    p = sub.add_parser("search", help="find workplaces by name and open one")
+    p.add_argument("name", nargs="?", help="workplace name, or part of it; asked for when omitted")
+    p.add_argument("--limit", type=int, default=20, help="max workplaces to list (default 20)")
+    p.set_defaults(func=cmd_search)
 
     args = parser.parse_args(argv)
     return args.func(args)

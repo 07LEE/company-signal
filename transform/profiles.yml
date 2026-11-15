@@ -1,0 +1,17 @@
+# No secrets here. Paths are relative to where dbt is started (the repo root),
+# or set COMPANY_SIGNAL_DATA_DIR to an absolute data directory.
+company_signal:
+  target: local
+  outputs:
+    local:
+      type: duckdb
+      path: "{{ env_var('COMPANY_SIGNAL_DATA_DIR', 'data') }}/warehouse.duckdb"
+      threads: 4
+      attach:
+        # Written by the collector. Read-only here.
+        - path: "{{ env_var('COMPANY_SIGNAL_DATA_DIR', 'data') }}/company_signal.duckdb"
+          alias: collected
+          read_only: true
+      retries:
+        connect_attempts: 30
+        retryable_exceptions: [IOException]

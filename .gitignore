@@ -5,3 +5,7 @@ uv.lock
 __pycache__/
 *.egg-info/
 .pytest_cache/
+transform/target/
+transform/logs/
+logs/
+transform/.user.yml

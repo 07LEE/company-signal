@@ -25,7 +25,13 @@ class Settings:
 
     @property
     def db_path(self) -> Path:
+        """Written by the collector: raw records and collection state."""
         return self.data_dir / "company_signal.duckdb"
+
+    @property
+    def warehouse_path(self) -> Path:
+        """Written by dbt: the tables the lookup reads."""
+        return self.data_dir / "warehouse.duckdb"
 
 
 def read_env_file(path: Path) -> dict[str, str]:
