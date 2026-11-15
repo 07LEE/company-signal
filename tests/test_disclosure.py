@@ -59,7 +59,7 @@ def test_company_from_answer_ties_only_one_matching_corporation(warehouse):
     page = answer(corp("c1", "1238100001"), corp("c1", "1238100001", employees="0", published="20251014"), corp("c2", "9998100002"))
     company = company_from_answer(con, "w1", "한빛", [page])
     assert company["crno"] == "c1" and company["employee_count"] == 120 and company["avg_tenure_years"] == 6.5
-    assert company["figures_published_on"] == date(2026, 11, 14)
+    assert company["figures_published_on"] == date(2026, 5, 8)  # when the record with these figures first appeared
     # Two corporations with the workplace's 6 digits: either could be wrong, so none.
     assert company_from_answer(con, "w1", "한빛", [answer(corp("c1", "1238100001"), corp("c3", "1238100003"))]) is None
     assert company_from_answer(con, "w1", "한빛", [answer()]) is None

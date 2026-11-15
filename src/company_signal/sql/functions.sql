@@ -130,12 +130,17 @@ create or replace macro fsc_outline_rows(page_table) as table
 -- date they were first published, so a report published later wins over one
 -- published earlier on the same day. The last keys only make the choice the
 -- same on every run.
+--
+-- The date shown with the figures is when their snapshot was first published.
+-- The last-published date moves forward each time the record is processed
+-- again, even when nothing in it changed.
 create or replace macro fsc_corporations(item_table) as table
     with item as (
         from query_table(item_table)
     ),
     figures as (
-        select crno, employee_count, avg_tenure_years, avg_yearly_pay, published_on as figures_published_on
+        select crno, employee_count, avg_tenure_years, avg_yearly_pay,
+            coalesce(first_published_on, published_on) as figures_published_on
         from item
         where employee_count is not null or avg_tenure_years is not null or avg_yearly_pay is not null
         qualify row_number() over (
