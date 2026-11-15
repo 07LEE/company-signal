@@ -39,7 +39,7 @@ def cmd_collect(args: argparse.Namespace) -> int:
     settings = load_settings()
     client = Client(settings.service_key, interval=args.interval)
     try:
-        collect(client, Store(settings.db_path), settings.raw_dir, args.months, args.max_pages)
+        collect(client, Store(settings.db_path), settings.raw_dir, args.months, args.max_pages, workers=args.workers)
     except FetchError as exc:
         print(f"Collection stopped: {exc}", file=sys.stderr)
         print("Run the same command again to resume where it stopped.", file=sys.stderr)
@@ -101,6 +101,12 @@ def month_count(text: str) -> int | None:
         return None
     if not text.isdecimal() or int(text) < 1:
         raise argparse.ArgumentTypeError('give a number of months, or "all"')
+    return int(text)
+
+
+def positive_int(text: str) -> int:
+    if not text.isdecimal() or int(text) < 1:
+        raise argparse.ArgumentTypeError("give a number of 1 or more")
     return int(text)
 
 
@@ -256,7 +262,13 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("collect", help="download publications, newest first, into the database")
     p.add_argument("--months", type=int, default=13, help="number of publications to download (default 13)")
     p.add_argument("--max-pages", type=int, default=None, help="max pages per publication (for testing)")
-    p.add_argument("--interval", type=float, default=0.2, help="seconds to wait between calls")
+    p.add_argument("--interval", type=float, default=0.2, help="seconds each request thread waits between calls")
+    p.add_argument(
+        "--workers",
+        type=positive_int,
+        default=4,
+        help="pages requested at once (default 4; more than 8 was no faster when tried)",
+    )
     p.set_defaults(func=cmd_collect)
 
     p = sub.add_parser("enrich", help="collect company disclosures for the workplaces, largest first")

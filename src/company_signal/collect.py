@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import os
+from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from datetime import date
 from pathlib import Path
 
@@ -41,8 +42,14 @@ def collect_publication(
     publication: Publication,
     max_pages: int | None = None,
     log=print,
+    workers: int = 1,
 ) -> bool:
-    """Download one publication. Returns True when it is complete."""
+    """Download one publication. Returns True when it is complete.
+
+    Pages are requested by `workers` threads at once, since most of the time of
+    a request is spent waiting for the server. Only this thread writes, so the
+    files and the database see one page at a time.
+    """
     pid = publication.publication_id
     if store.status_of(pid) == "complete":
         log(f"  skipped (already complete): {publication.title}")
@@ -70,12 +77,23 @@ def collect_publication(
     last_page = min(page_count, max_pages) if max_pages else page_count
     log(f"  {publication.title}: {total:,} rows, {page_count} pages ({len(done_pages)} already fetched)")
 
-    for page in range(2, last_page + 1):
-        if page in done_pages:
-            continue
-        save(page, client.fetch_page(pid, page))
-        if page % 50 == 0 or page == last_page:
-            log(f"    page {page}/{page_count}")
+    todo = [page for page in range(2, last_page + 1) if page not in done_pages]
+    saved = 0
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        pending = {pool.submit(client.fetch_page, pid, page): page for page in todo}
+        try:
+            while pending:
+                finished, _ = wait(pending, return_when=FIRST_EXCEPTION)
+                for future in finished:
+                    page = pending.pop(future)
+                    save(page, future.result())  # raises the fetch error, if any
+                    saved += 1
+                    if saved % 50 == 0 or not pending:
+                        log(f"    {len(done_pages) + saved}/{page_count} pages")
+        except BaseException:
+            # Pages already saved stay saved; the next run fetches the rest.
+            pool.shutdown(wait=True, cancel_futures=True)
+            raise
 
     done, fetched, expected = store.try_complete(pid)
     if done:
@@ -94,6 +112,7 @@ def collect(
     months: int,
     max_pages: int | None = None,
     log=print,
+    workers: int = 1,
 ) -> None:
     store.init()
     publications = client.list_publications()
@@ -103,4 +122,4 @@ def collect(
     targets = pick_recent(publications, months)
     for i, publication in enumerate(targets, 1):
         log(f"[{i}/{len(targets)}]")
-        collect_publication(client, store, raw_dir, publication, max_pages, log)
+        collect_publication(client, store, raw_dir, publication, max_pages, log, workers)

@@ -1,6 +1,8 @@
 import json
 import subprocess
 import sys
+import threading
+import time
 from datetime import date
 
 import duckdb
@@ -84,6 +86,52 @@ def test_collect_resumes_and_completes(tmp_path):
         ).fetchone()
     assert row[0] == "회사2000"
 
+
+
+def test_pages_are_requested_at_once_and_written_by_one_thread(tmp_path):
+    total = 8500  # 9 pages
+    lock = threading.Lock()
+    in_flight, most_in_flight = 0, 0
+
+    def handler(request):
+        nonlocal in_flight, most_in_flight
+        with lock:
+            in_flight += 1
+            most_in_flight = max(most_in_flight, in_flight)
+        time.sleep(0.05)
+        with lock:
+            in_flight -= 1
+        page = int(request.url.params["page"])
+        if page == 7 and fail:
+            return httpx.Response(500, text="boom")
+        return httpx.Response(200, text=page_body(page, total))
+
+    store = Store(tmp_path / "t.duckdb")
+    store.init()
+    pub = Publication("uddi:test", "시험_20261022", date(2026, 10, 22))
+    store.upsert_publications([pub])
+    writers = set()
+    record_page = store.record_page
+
+    def record_in_thread(*args):
+        writers.add(threading.get_ident())
+        return record_page(*args)
+
+    store.record_page = record_in_thread
+
+    # A failing page stops the run; the pages that arrived are kept.
+    fail = True
+    with pytest.raises(FetchError):
+        collect_publication(make_client(handler), store, tmp_path / "raw", pub, log=lambda _: None, workers=4)
+    assert 7 not in store.fetched_pages("uddi:test")
+    assert store.status_of("uddi:test") == "in_progress"
+
+    fail = False
+    assert collect_publication(make_client(handler), store, tmp_path / "raw", pub, log=lambda _: None, workers=4)
+    assert store.fetched_pages("uddi:test") == set(range(1, 10))
+    assert store.counts() == (1, total)
+    assert most_in_flight > 1
+    assert writers == {threading.get_ident()}
 
 def test_record_page_is_idempotent(tmp_path):
     def handler(request):
