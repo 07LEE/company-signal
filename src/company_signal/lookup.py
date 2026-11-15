@@ -380,8 +380,11 @@ def format_summary(workplace: dict, months: list[dict]) -> str:
     """Who the workplace is and its latest month. This part stays put while the history is paged."""
     latest = months[-1]
     month_count = workplace["months_observed"]
-    lines = [
-        workplace["workplace_name"],
+    lines = [workplace["workplace_name"]]
+    # Earlier names of a workplace that renamed itself and was kept as one.
+    for former in workplace.get("former_names") or []:
+        lines.append(f"  formerly   {former['name']} (to {former['last_base_ym']:%Y-%m})")
+    lines += [
         f"  address    {workplace['road_address'] or '-'}",
         f"  industry   {workplace['industry_name'] or '-'}",
         f"  type       {WORKPLACE_TYPES.get(workplace['workplace_type_code'], 'unknown')}"

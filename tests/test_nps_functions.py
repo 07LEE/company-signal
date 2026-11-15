@@ -103,3 +103,18 @@ def test_nps_name_core(con):
     assert con.execute(
         "select nps_name_core('한빛로보틱스(HANBITROBOTICSINC.)'), nps_name_core('농업회사법인열정농산'), nps_name_core('영암군청(2025년녹지관리)')"
     ).fetchone() == ("한빛로보틱스", "열정농산", "영암군청(2025년녹지관리)")
+
+
+
+def test_a_renamed_workplace_lists_its_earlier_name(con):
+    workplace_months(con, [
+        ("2024-03", "주식회사 한빛", 23810),
+        ("2024-04", "주식회사 한빛 ( Hanbit Inc. )", 23810),
+        ("2024-05", "주식회사  한빛 ( Hanbit Inc. )", 23810),  # spacing only: the same name
+        ("2024-05", "가람", 23810),
+    ])
+    con.execute("create table m as from nps_workplace_months('rows', 'picked')")
+    con.execute("create table mm as from nps_monthly('m')")
+    rows = dict(con.execute("select workplace_name, former_names from nps_workplaces('m', 'mm')").fetchall())
+    assert rows["주식회사  한빛 ( Hanbit Inc. )"] == [{"name": "주식회사 한빛", "last_base_ym": date(2024, 3, 1)}]
+    assert rows["가람"] is None

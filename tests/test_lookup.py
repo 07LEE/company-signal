@@ -173,6 +173,14 @@ def test_detail_shows_rates_and_says_why_yearly_attrition_is_missing():
     assert "Not in the latest data" not in text
 
 
+
+def test_summary_lists_the_names_a_renamed_workplace_had():
+    months = [month(date(2026, 8, 1), 100, 5, 3, None), month(date(2026, 9, 1), 104, 8, 4, 100)]
+    former = [{"name": "한빛", "last_base_ym": date(2024, 3, 1)}]
+    lines = format_summary(workplace(former_names=former), months).splitlines()
+    assert lines[:2] == ["(주)한빛", "  formerly   한빛 (to 2024-03)"]
+    assert "formerly" not in format_summary(workplace(former_names=None), months)
+
 def test_detail_of_small_workplace_shows_counts_without_rates():
     months = [month(date(2026, 8, 1), 4, 0, 1, None), month(date(2026, 9, 1), 3, 0, 1, 4)]
     text = format_detail(workplace(), months)

@@ -7,7 +7,10 @@ failure the same command is simply run again.
 
 from __future__ import annotations
 
+import json
 import os
+import subprocess
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -44,17 +47,25 @@ class StepFailed(RuntimeError):
 
 
 def run_dbt(project_dir: Path, data_dir: Path, select: str | None = None) -> BuildResult:
-    """dbt build, in this process, over the data in `data_dir`."""
-    from dbt.cli.main import dbtRunner  # slow to import; only the build needs it
+    """dbt build over the data in `data_dir`, in a child process.
 
-    os.environ["COMPANY_SIGNAL_DATA_DIR"] = str(data_dir.resolve())
+    In this process dbt would keep its DuckDB connection to the warehouse open
+    after the build, and the next step could not open the file read-only. The
+    counts come from target/run_results.json, the record dbt leaves of each run.
+    """
+    results_file = project_dir / "target" / "run_results.json"
+    results_file.unlink(missing_ok=True)  # never count an earlier run's results
     args = ["build", "--project-dir", str(project_dir), "--profiles-dir", str(project_dir)]
     if select:
         args += ["--select", select]
-    outcome = dbtRunner().invoke(args)
-    statuses = [str(r.status) for r in outcome.result.results] if outcome.result is not None else []
+    code = "import sys; from dbt.cli.main import cli; sys.exit(cli())"
+    env = os.environ | {"COMPANY_SIGNAL_DATA_DIR": str(data_dir.resolve())}
+    finished = subprocess.run([sys.executable, "-c", code, *args], env=env)
+    statuses = []
+    if results_file.exists():
+        statuses = [r["status"] for r in json.loads(results_file.read_text())["results"]]
     return BuildResult(
-        success=outcome.success,
+        success=finished.returncode == 0,
         passed=sum(s in PASSED for s in statuses),
         failed=sum(s in FAILED for s in statuses),
         other=sum(s not in PASSED and s not in FAILED for s in statuses),

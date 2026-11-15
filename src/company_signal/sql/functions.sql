@@ -427,6 +427,25 @@ create or replace macro nps_workplaces(month_table, monthly_table) as table
 
         select max(base_ym) as latest_data_ym from query_table(month_table)
 
+    ),
+
+    former as (
+
+        -- Names of earlier stretches that nps_workplace_months joined to this
+        -- workplace, newest first. Spelling changes within one key, such as
+        -- spacing, keep the normalized name and are not listed.
+        select
+            m.workplace_id,
+            list({'name': m.workplace_name, 'last_base_ym': m.last_base_ym} order by m.last_base_ym desc) as former_names
+        from (
+            select workplace_id, name_norm, arg_max(workplace_name, base_ym) as workplace_name, max(base_ym) as last_base_ym
+            from query_table(month_table)
+            group by workplace_id, name_norm
+        ) as m
+        inner join latest as l using (workplace_id)
+        where m.name_norm <> l.name_norm
+        group by m.workplace_id
+
     )
 
     select
@@ -451,10 +470,12 @@ create or replace macro nps_workplaces(month_table, monthly_table) as table
         case
             when t.month_count = 12 and t.avg_subscriber_count > 0
                 then t.lost_subscriber_count / t.avg_subscriber_count
-        end as attrition_rate_12m
+        end as attrition_rate_12m,
+        f.former_names
     from latest as l
     inner join history as h using (workplace_id)
     left join last_12_months as t using (workplace_id)
+    left join former as f using (workplace_id)
     cross join data_bounds as b;
 
 -- nps_years: One row per workplace and calendar year.

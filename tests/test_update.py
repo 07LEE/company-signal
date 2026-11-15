@@ -1,9 +1,10 @@
+import duckdb
 import pytest
 
 from company_signal.api import FetchError
 from company_signal.collect import CollectResult
 from company_signal.enrich import EnrichResult
-from company_signal.pipeline import DISCLOSURE_MODELS, BuildResult, StepFailed, Steps, update
+from company_signal.pipeline import DISCLOSURE_MODELS, BuildResult, StepFailed, Steps, run_dbt, update
 
 NOTHING_COLLECTED = CollectResult(publications_completed=0, pages_fetched=0)
 NOTHING_ASKED = EnrichResult(names_asked=0, calls=0, names_left=0, limit_reached=False)
@@ -72,3 +73,26 @@ def test_a_failed_step_stops_the_steps_after_it():
         update(fake_steps(calls, collected=collected, built=broken), log=lambda _: None)
     assert calls == [("collect",), ("build", None)]  # no enrich over a broken build
     assert failed.value.args[0][-1].startswith("build: 30 passed, 2 failed, 8 other")
+
+
+def test_run_dbt_leaves_the_warehouse_free_for_the_next_step(tmp_path):
+    """dbt runs apart, so this process can open the warehouse right after the build, as enrich does."""
+    project = tmp_path / "transform"
+    (project / "models").mkdir(parents=True)
+    (project / "dbt_project.yml").write_text("name: t\nversion: '1.0.0'\nconfig-version: 2\nprofile: t\n")
+    (project / "profiles.yml").write_text(
+        "t:\n  target: local\n  outputs:\n    local:\n      type: duckdb\n"
+        "      path: \"{{ env_var('COMPANY_SIGNAL_DATA_DIR') }}/warehouse.duckdb\"\n"
+    )
+    (project / "models" / "one.sql").write_text("select 1 as x")
+    data = tmp_path / "data"
+    data.mkdir()
+
+    result = run_dbt(project, data)
+    assert result == BuildResult(success=True, passed=1, failed=0, other=0)
+    con = duckdb.connect(str(data / "warehouse.duckdb"), read_only=True)
+    assert con.execute("select x from one").fetchone() == (1,)
+    con.close()
+
+    (project / "models" / "one.sql").write_text("select from nowhere")
+    assert not run_dbt(project, data).success
