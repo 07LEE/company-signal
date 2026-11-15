@@ -64,3 +64,65 @@ def test_live_search_with_nothing_left_to_search_for_does_not_call_the_api():
     seen = []
     assert search_live(client_for([], seen=seen), "(주)") is None
     assert seen == []
+
+
+def publication_spec(*dates):
+    return {"paths": {f"/15083277/v1/uddi:{d}": {"get": {"summary": f"국민연금공단_국민연금 가입 사업장 내역_{d}"}} for d in dates}}
+
+
+def history_client(months, seen):
+    """A fake API: publication YYYYMMDD holds the month before it; old ones use the old column name."""
+    spec = publication_spec(*months)
+    columns = nps_columns()
+
+    def handler(request):
+        if "oas/docs" in str(request.url):
+            return httpx.Response(200, json=spec)
+        stamp = request.url.path.rsplit(":", 1)[1]
+        params = dict(request.url.params)
+        seen.append((stamp, {k: v for k, v in params.items() if k.startswith("cond")}))
+        period_old = stamp < "20211101"
+        base = f"{int(stamp[:4]) - (stamp[4:6] == '01')}-{(int(stamp[4:6]) - 2) % 12 + 1:02d}"
+        rec = record("(주)한빛", 123810, "2015-04-01", 100 + len(seen))
+        rec[columns["base_ym"][0]] = base
+        if period_old:  # old publications name the columns differently
+            rec = {columns[k][-1]: rec[columns[k][0]] for k in columns}
+            if "cond[사업자등록번호::EQ]" in params:
+                return httpx.Response(200, text='{"currentCount":0}')  # a column it does not have
+        body = {"data": [rec], "matchCount": 1, "totalCount": 500000}
+        return httpx.Response(200, text=json.dumps(body, ensure_ascii=False))
+
+    return Client("k", interval=0, sleep=lambda _: None, transport=httpx.MockTransport(handler))
+
+
+def test_history_is_asked_by_number_and_switches_column_name_for_old_publications():
+    from company_signal.live import fetch_history
+    from company_signal.lookup import load_overall, load_years
+
+    seen = []
+    client = history_client(["20261022", "20260923", "20211118", "20211022"], seen)
+    live = search_live(client, "한빛")
+    wid = live.con.execute("select workplace_id from mart.mart_workplace").fetchone()[0]
+    seen.clear()
+    assert fetch_history(client, live, wid, months=None) is None
+    stamps = [s for s, _ in seen]
+    assert stamps[:2] == ["20260923", "20211118"]
+    assert seen[0][1] == {"cond[사업자등록번호::EQ]": "123810"}
+    # The oldest publication does not know the current name; the old one is tried and kept.
+    assert seen[-1][1] == {f"cond[{nps_columns()['biz_reg_no'][-1]}::EQ]": "123810"}
+    assert live.months_fetched == ["2021-09", "2021-10", "2026-08", "2026-09"]
+    workplace, months = load_detail(live.con, wid)
+    assert len(months) == 4 and months[-1]["previous_subscriber_count"] is not None
+    assert load_years(live.con, wid) and load_overall(live.con, wid)
+
+
+def test_history_takes_only_the_months_asked_for():
+    from company_signal.live import fetch_history
+
+    seen = []
+    client = history_client(["20261022", "20260923", "20260825", "20260723"], seen)
+    live = search_live(client, "한빛")
+    wid = live.con.execute("select workplace_id from mart.mart_workplace").fetchone()[0]
+    seen.clear()
+    fetch_history(client, live, wid, months=2)
+    assert [s for s, _ in seen] == ["20260923"]  # the latest month is already there

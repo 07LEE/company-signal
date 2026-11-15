@@ -92,20 +92,23 @@ class Client:
         params = {"page": page, "perPage": PER_PAGE, "returnType": "JSON"}
         return self._get(url, params=params, expect_key="data")
 
-    def fetch_matching(self, publication_id: str, conditions: dict[tuple[str, str], str], page: int = 1) -> bytes:
+    def fetch_matching(self, publication_id: str, conditions: dict[tuple[str, str], str], page: int = 1) -> bytes | None:
         """One page of the records of a publication that meet `conditions`, as received.
 
         A condition is (source column name, operator) -> value, sent as
         cond[name::OPERATOR]. LIKE matches names containing the value, ignoring
         case; EQ matches exactly. The published spec does not list these
         parameters, but the API accepts them (checked 2026-11-15).
+
+        None when the publication has no column of that name: the API then
+        answers 200 without data, which is not worth retrying.
         """
         url = f"{BASE_URL}/{DATASET}/v1/{publication_id}"
         params = {"page": page, "perPage": PER_PAGE, "returnType": "JSON"}
         params |= {f"cond[{column}::{operator}]": value for (column, operator), value in conditions.items()}
-        return self._get(url, params=params, expect_key="data")
+        return self._get(url, params=params, expect_key="data", missing_ok=True)
 
-    def _get(self, url: str, params: dict | None, expect_key: str) -> bytes:
+    def _get(self, url: str, params: dict | None, expect_key: str, missing_ok: bool = False) -> bytes | None:
         last_problem = ""
         for attempt in range(1, self._max_attempts + 1):
             try:
@@ -118,6 +121,9 @@ class Client:
                     if _has_key(response.content, expect_key):
                         self._sleep(self._interval)
                         return response.content
+                    if missing_ok:
+                        self._sleep(self._interval)
+                        return None
                     last_problem = f"200 without '{expect_key}': {response.text[:200]}"
                 elif response.status_code in RETRY_STATUS:
                     last_problem = f"HTTP {response.status_code}: {response.text[:200]}"

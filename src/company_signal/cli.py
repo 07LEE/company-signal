@@ -14,7 +14,7 @@ from .collect import collect
 from .config import KEY_ENV, Settings, load_settings
 from .disclosure import company_from_answer, company_loader, query_name_if_askable
 from .enrich import enrich
-from .live import search_live
+from .live import fetch_history, search_live
 from .fsc import FscClient
 from .lookup import (
     DEFAULT_MONTHS,
@@ -130,6 +130,26 @@ def company_for_untied(settings: Settings, workplace_id: str, query_name: str):
     return None
 
 
+def fetch_live_history(settings: Settings, live, workplace_id: str, args: argparse.Namespace) -> None:
+    """Fetch as many earlier months as the view asks for (--months, --from), showing progress."""
+    shown = False
+
+    def progress(done: int, total: int) -> None:
+        nonlocal shown
+        shown = True
+        print(f"\rFetching earlier months from the pension API: {done}/{total}", end="", flush=True)
+
+    client = Client(settings.service_key)
+    try:
+        stopped = fetch_history(client, live, workplace_id, args.months, args.start, progress)
+    finally:
+        client.close()
+    if shown:
+        print()
+    if stopped:
+        print(f"Stopped fetching earlier months: {stopped}")
+
+
 def cmd_search(args: argparse.Namespace) -> int:
     if args.start and args.end and args.start > args.end:
         print("--from must not be later than --to.", file=sys.stderr)
@@ -182,6 +202,8 @@ def cmd_search(args: argparse.Namespace) -> int:
         selected = choose(hits)
         if selected is None:
             return 0
+        if live:
+            fetch_live_history(settings, live, selected.workplace_id, args)
 
         with nullcontext(live.con) if live else closing(open_warehouse(warehouse)) as con:
             workplace, months = load_detail(con, selected.workplace_id)
@@ -199,7 +221,7 @@ def cmd_search(args: argparse.Namespace) -> int:
         print()
         print(format_notes(workplace, months))
         if live:
-            print(f"  - Fetched from the pension API for this search: {live.base_ym} only, so no rates yet.")
+            print(f"  - Fetched from the pension API for this search: {live.span}. Nothing is stored.")
     except WarehouseMissing as exc:
         print(exc, file=sys.stderr)
         return 1
