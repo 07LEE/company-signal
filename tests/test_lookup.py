@@ -13,6 +13,7 @@ from company_signal.lookup import (
     format_history,
     format_hits,
     format_notes,
+    format_overall,
     format_summary,
     format_yearly,
     pick_months,
@@ -360,11 +361,11 @@ def test_yearly_marks_years_with_missing_months():
     full, partial = [line for line in text.splitlines() if line.startswith("  202")]
     assert "10.0%" in full and "10.0%*" not in full and "+6.3%" in full
     assert "10.0%*" in partial
-    assert "fewer than 12 months" in text
+    assert "* under 12 months of data." in text
 
 
 def test_yearly_has_no_footnote_when_every_year_is_complete():
-    assert "fewer than 12 months" not in format_yearly([year(2024), year(2025)])
+    assert "under 12 months" not in format_yearly([year(2024), year(2025)])
 
 
 def test_yearly_hides_rates_of_small_workplaces():
@@ -406,3 +407,91 @@ def test_browse_without_yearly_data_does_not_offer_it(capsys):
     browse(months, pick_months(months, last=3), [], ask=ask, in_place=False)
     assert "[y]" not in prompts[0]
     assert "Type <, >, a or q." in capsys.readouterr().out
+
+
+def overall(**overrides):
+    base = {
+        "first_base_ym": date(2021, 1, 1),
+        "last_base_ym": date(2025, 12, 1),
+        "months_observed": 60,
+        "first_subscriber_count": 80,
+        "last_subscriber_count": 100,
+        "avg_subscriber_count": 92.0,
+        "new_subscriber_total": 120,
+        "lost_subscriber_total": 100,
+        "attrition_rate_per_year": 0.125,
+        "attrition_rate_3y": 0.16,
+        "attrition_rate_12m": 0.2,
+        "replacement_rate_per_year": 0.11,
+        "replacement_rate_3y": 0.14,
+        "replacement_rate_12m": 0.18,
+        "implied_tenure_years": 8.0,
+        "implied_tenure_years_3y": 6.25,
+        "implied_tenure_years_12m": 5.0,
+        "first_est_income": 3_000_000,
+        "last_est_income": 3_300_000,
+        "income_growth_per_year": 0.019,
+        "scheme_age_years": 12.0,
+    }
+    return base | overrides
+
+
+def cells(text, label):
+    """The three span cells of one row of the summary."""
+    line = [line for line in text.splitlines() if line.strip().startswith(label)][0]
+    return [line[20 + 16 * i : 20 + 16 * (i + 1)].strip() for i in range(3)]
+
+
+def test_overall_shows_three_spans_side_by_side():
+    text = format_overall(overall())
+    assert text.splitlines()[0] == "Summary  2021-01 to 2025-12 (60 months)"
+    assert "80 to 100  (+25.0%)" in text
+    assert "120 / 100" in text
+    assert cells(text, "attrition / year") == ["12.5%", "16.0%", "20.0%"]
+    assert cells(text, "replaced / year") == ["11.0%", "14.0%", "18.0%"]
+    assert cells(text, "implied tenure") == ["8.0 years", "6.2 years", "5.0 years"]
+    assert "3,000,000 to 3,300,000  (+1.9% a year)" in text
+    assert text.splitlines()[-1] == '  "-" needs more months. Implied tenure = 1 / attrition, not a measured tenure.'
+
+
+def test_overall_leaves_a_span_empty_until_its_months_exist():
+    text = format_overall(
+        overall(months_observed=20, attrition_rate_3y=None, replacement_rate_3y=None, implied_tenure_years_3y=None)
+    )
+    assert cells(text, "attrition / year") == ["12.5%", "-", "20.0%"]
+    assert cells(text, "implied tenure") == ["8.0 years", "-", "5.0 years"]
+
+
+def test_overall_caps_tenure_at_the_age_of_the_workplace():
+    text = format_overall(overall(scheme_age_years=5.5))
+    assert cells(text, "implied tenure") == ["over 5.5 years", "over 5.5 years", "5.0 years"]
+
+
+def test_overall_hides_rates_of_small_workplaces():
+    text = format_overall(overall(avg_subscriber_count=3.0))
+    assert cells(text, "attrition / year") == ["-", "-", "-"]
+    assert '"-" hidden below 5 staff.' in text
+
+
+def test_overall_shows_no_tenure_when_nobody_left():
+    text = format_overall(overall(attrition_rate_12m=0.0, implied_tenure_years_12m=None))
+    assert cells(text, "attrition / year")[2] == "0.0%"
+    assert cells(text, "implied tenure")[2] == "-"
+
+
+def test_browse_reaches_every_view_and_names_the_others_in_the_prompt(capsys):
+    months = year_of_months()
+    prompts = []
+    keys = iter(["s", "y", "<", "m"])
+
+    def ask(prompt):
+        prompts.append(prompt)
+        return next(keys, "q")
+
+    browse(months, pick_months(months, last=3), [year(2026)], overall(), ask=ask, in_place=False)
+    out = capsys.readouterr().out
+    assert prompts[0].endswith("[y] yearly  [s] summary  [q] quit: ")
+    assert prompts[1] == "[m] monthly  [y] yearly  [q] quit: "
+    assert prompts[2] == "[m] monthly  [s] summary  [q] quit: "
+    assert "Summary  2021-01 to 2025-12" in out and "Yearly report" in out
+    assert "Type m, s or q." in out  # paging keys do nothing outside the monthly view

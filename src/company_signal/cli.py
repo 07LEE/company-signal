@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from contextlib import closing
 from datetime import date
 
 from .api import Client, FetchError
@@ -18,6 +19,7 @@ from .lookup import (
     format_notes,
     format_summary,
     load_detail,
+    load_overall,
     load_years,
     open_warehouse,
     pick_months,
@@ -82,12 +84,7 @@ def cmd_search(args: argparse.Namespace) -> int:
     if args.start and args.end and args.start > args.end:
         print("--from must not be later than --to.", file=sys.stderr)
         return 2
-    settings = load_settings(require_key=False)
-    try:
-        con = open_warehouse(settings.warehouse_path)
-    except WarehouseMissing as exc:
-        print(exc, file=sys.stderr)
-        return 1
+    warehouse = load_settings(require_key=False).warehouse_path
     try:
         name = args.name
         if name is None:
@@ -97,7 +94,12 @@ def cmd_search(args: argparse.Namespace) -> int:
             name = input("Workplace name: ").strip()
             if not name:
                 return 0
-        hits, total = search(con, name, args.limit)
+
+        # The warehouse is open only while reading, never while waiting for a
+        # key. A lookup left sitting at a prompt would otherwise keep the file
+        # open and block the next dbt build from writing to it.
+        with closing(open_warehouse(warehouse)) as con:
+            hits, total = search(con, name, args.limit)
         print(format_hits(hits, total, name))
         # Piped output gets the list only; a person at a terminal gets to pick one.
         if not sys.stdin.isatty():
@@ -105,19 +107,27 @@ def cmd_search(args: argparse.Namespace) -> int:
         selected = choose(hits)
         if selected is None:
             return 0
-        print()
-        workplace, months = load_detail(con, selected.workplace_id)
+
+        with closing(open_warehouse(warehouse)) as con:
+            workplace, months = load_detail(con, selected.workplace_id)
+            years = load_years(con, selected.workplace_id)
+            overall = load_overall(con, selected.workplace_id)
         shown = pick_months(months, last=args.months, start=args.start, end=args.end)
+        print()
         print(format_summary(workplace, months))
         print()
-        browse(months, shown, load_years(con, selected.workplace_id))
+        browse(months, shown, years, overall)
         print()
         print(format_notes(workplace, months))
+    except WarehouseMissing as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    except LookupError:
+        print("That workplace is no longer in the warehouse; it was rebuilt meanwhile. Search again.", file=sys.stderr)
+        return 1
     except (EOFError, KeyboardInterrupt):
         print()
         return 130
-    finally:
-        con.close()
     return 0
 
 

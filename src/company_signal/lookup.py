@@ -161,6 +161,16 @@ def load_years(con: duckdb.DuckDBPyConnection, workplace_id: str) -> list[dict]:
     return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
 
+def load_overall(con: duckdb.DuckDBPyConnection, workplace_id: str) -> dict | None:
+    """The whole-period row of one workplace. None if the warehouse has no such table yet."""
+    try:
+        cursor = con.execute("select * from mart.mart_workplace_overall where workplace_id = ?", [workplace_id])
+    except duckdb.CatalogException:
+        return None
+    row = cursor.fetchone()
+    return dict(zip([d[0] for d in cursor.description], row)) if row else None
+
+
 def pick_months(
     months: list[dict],
     last: int | None = DEFAULT_MONTHS,
@@ -232,9 +242,66 @@ def format_yearly(years: list[dict]) -> str:
             f"{f'{income:,}' if income is not None else '-':>13}"
             f"{f'{change * 100:+.1f}%' if change is not None else '-':>9}"
         )
-    if any_partial:
-        lines.append("  * fewer than 12 months of data for that year, so not a full-year rate")
-    lines.append('  attrition = left / avg staff.  replaced = the smaller of joined and left / avg staff.')
+    lines.append("")
+    lines.append(
+        ("  * under 12 months of data. " if any_partial else "  ")
+        + "attrition = left / avg staff, replaced = min(joined, left) / avg staff."
+    )
+    return "\n".join(lines)
+
+
+# The three spans of the summary: column title and the suffix of its columns in the overall mart.
+SPANS = (("whole period", "per_year", ""), ("last 3 years", "3y", "_3y"), ("last 12 months", "12m", "_12m"))
+
+
+def format_overall(o: dict) -> str:
+    """The whole collected period: three single figures, then three rates over three spans.
+
+    A span stays empty until every month of it has been collected.
+    """
+    count = o["months_observed"]
+    lines = [
+        f"Summary  {o['first_base_ym']:%Y-%m} to {o['last_base_ym']:%Y-%m} ({count} month{'s' if count != 1 else ''})",
+        "",
+    ]
+
+    first, last = o["first_subscriber_count"], o["last_subscriber_count"]
+    change = f"  ({(last - first) / first * 100:+.1f}%)" if first else ""
+    lines.append(f"  {'staff':<16}{first:,} to {last:,}{change}")
+    lines.append(f"  {'joined / left':<16}{o['new_subscriber_total']:,} / {o['lost_subscriber_total']:,}")
+    first_income, last_income = o["first_est_income"], o["last_est_income"]
+    if first_income is None or last_income is None:
+        lines.append(f"  {'est. income':<16}-")
+    else:
+        growth = o["income_growth_per_year"]
+        yearly = f"  ({growth * 100:+.1f}% a year)" if growth is not None else ""
+        lines.append(f"  {'est. income':<16}{first_income:,} to {last_income:,}{yearly}")
+
+    staff = o["avg_subscriber_count"]
+    too_small = staff is None or staff < MIN_HEADCOUNT_FOR_RATES
+    age = o["scheme_age_years"]
+
+    def percent(value: float | None) -> str:
+        return "-" if too_small or value is None else f"{value * 100:.1f}%"
+
+    def tenure(value: float | None) -> str:
+        if too_small or value is None:
+            return "-"
+        # Nobody can have stayed longer than the workplace has been in the scheme.
+        return f"over {age:.1f} years" if age is not None and value > age else f"{value:.1f} years"
+
+    def spans(label: str, cells: list[str]) -> None:
+        lines.append(f"  {label:<18}" + "".join(f"{cell:>16}" for cell in cells))
+
+    lines.append("")
+    spans("", [title for title, _, _ in SPANS])
+    spans("attrition / year", [percent(o[f"attrition_rate_{key}"]) for _, key, _ in SPANS])
+    spans("replaced / year", [percent(o[f"replacement_rate_{key}"]) for _, key, _ in SPANS])
+    spans("implied tenure", [tenure(o[f"implied_tenure_years{suffix}"]) for _, _, suffix in SPANS])
+
+    lines.append("")
+    reason = f"hidden below {MIN_HEADCOUNT_FOR_RATES} staff" if too_small else "needs more months"
+    lines.append(f'  "-" {reason}. Implied tenure = 1 / attrition, not a measured tenure.')
     return "\n".join(lines)
 
 
@@ -308,6 +375,7 @@ def browse(
     months: list[dict],
     shown: list[dict],
     years: list[dict] | None = None,
+    overall: dict | None = None,
     ask=input,
     in_place: bool | None = None,
     terminal_size=shutil.get_terminal_size,
@@ -315,10 +383,11 @@ def browse(
     """Print the history table, then let the user page through it or switch views.
 
     In the monthly view `<` and `>` move the window by its own length toward
-    older or newer months and `a` shows everything. With `years` given, `y`
-    switches to the yearly report and `m` back. `q`, Enter or end of input
-    leaves. Nothing is asked when there is nothing else to show: the whole
-    history is on screen and there is no yearly report.
+    older or newer months and `a` shows everything. `y` switches to the yearly
+    report and `s` to the whole-period summary, when the caller has them, and
+    `m` goes back to the months. `q`, Enter or end of input leaves. Nothing is
+    asked when there is nothing else to show: the whole history is on screen
+    and there is no other view.
 
     On a terminal the table is redrawn where it stands, so the summary above
     stays in view. That needs the cursor to move back up over what was drawn,
@@ -336,18 +405,35 @@ def browse(
     high = low + len(shown)
 
     view = "monthly"
+    # Key -> (view, label), for the views there is data for.
+    views = {"m": ("monthly", "monthly")}
+    if years:
+        views["y"] = ("yearly", "yearly")
+    if overall:
+        views["s"] = ("summary", "summary")
 
     def block() -> str:
-        return format_yearly(years) if view == "yearly" else format_history(months, months[low:high])
+        if view == "yearly":
+            return format_yearly(years)
+        if view == "summary":
+            return format_overall(overall)
+        return format_history(months, months[low:high])
+
+    def other_views() -> list[tuple[str, str]]:
+        return [(key, label) for key, (name, label) in views.items() if name != view]
 
     def prompt() -> str:
-        if view == "yearly":
-            return "[m] monthly  [q] quit: "
-        return MONTHLY_KEYS + ("  [y] yearly" if years else "") + "  [q] quit: "
+        keys = [MONTHLY_KEYS] if view == "monthly" else []
+        keys += [f"[{key}] {label}" for key, label in other_views()]
+        return "  ".join(keys + ["[q] quit: "])
+
+    def valid_keys() -> str:
+        keys = (["<", ">", "a"] if view == "monthly" else []) + [key for key, _ in other_views()]
+        return "Type " + ", ".join(keys) + " or q."
 
     drawn = block()  # What is on screen right above the prompt, or None if it cannot be erased.
     print(drawn)
-    if len(shown) >= len(months) and not years:
+    if len(shown) >= len(months) and len(views) == 1:
         return
 
     def erase_drawn(status_shown: str) -> bool:
@@ -376,13 +462,10 @@ def browse(
             return
 
         previous_status, status = status, ""
-        if view == "yearly":
-            if answer == "m":
-                view = "monthly"
-            else:
-                status = "Type m or q."
-        elif answer == "y" and years:
-            view = "yearly"
+        if answer in views and views[answer][0] != view:
+            view = views[answer][0]
+        elif view != "monthly":
+            status = valid_keys()
         elif answer == "<":
             if low == 0:
                 status = "No earlier months."
@@ -398,7 +481,7 @@ def browse(
         elif answer == "a":
             low, high = 0, len(months)
         else:
-            status = "Type <, >, a, y or q." if years else "Type <, >, a or q."
+            status = valid_keys()
 
         if erase_drawn(previous_status):
             drawn = block()
