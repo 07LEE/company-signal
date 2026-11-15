@@ -10,10 +10,12 @@ from company_signal.lookup import (
     choose,
     display_width,
     fit,
-    format_detail,
     format_history,
     format_hits,
+    format_notes,
+    format_summary,
     pick_months,
+    screen_rows,
     search,
     shown_rate,
 )
@@ -147,6 +149,14 @@ def workplace(**overrides):
     return base | overrides
 
 
+def format_detail(workplace, months, shown=None):
+    """The whole view as the CLI prints it: summary, history, notes."""
+    shown = pick_months(months) if shown is None else shown
+    return "\n\n".join(
+        [format_summary(workplace, months), format_history(months, shown), format_notes(workplace, months)]
+    )
+
+
 def test_shown_rate_hides_rates_of_small_workplaces():
     assert shown_rate(0.25, 40) == "25.0%"
     assert shown_rate(0.25, 5) == "25.0%"
@@ -238,10 +248,12 @@ def titles(capsys):
     return [line for line in capsys.readouterr().out.splitlines() if line.startswith("Monthly history")]
 
 
-def test_browse_moves_the_window_older_and_newer(capsys):
+def test_browse_prints_the_table_then_moves_the_window(capsys):
     months = year_of_months()
-    browse(months, pick_months(months, last=3), ask=answers("<", "<", ">"))
-    assert titles(capsys) == [
+    browse(months, pick_months(months, last=3), ask=answers("<", "<", ">"), in_place=False)
+    out = capsys.readouterr().out
+    assert [line for line in out.splitlines() if line.startswith("Monthly history")] == [
+        "Monthly history (2026-10 to 2026-12, 3 of 12 months)",
         "Monthly history (2026-07 to 2026-09, 3 of 12 months)",
         "Monthly history (2026-04 to 2026-06, 3 of 12 months)",
         "Monthly history (2026-07 to 2026-09, 3 of 12 months)",
@@ -251,7 +263,7 @@ def test_browse_moves_the_window_older_and_newer(capsys):
 def test_browse_stops_at_both_ends_and_keeps_the_window_length(capsys):
     months = year_of_months()
     # Five months a page over twelve: the oldest page is still five months long.
-    browse(months, pick_months(months, last=5), ask=answers(">", "<", "<", "<"))
+    browse(months, pick_months(months, last=5), ask=answers(">", "<", "<", "<"), in_place=False)
     out = capsys.readouterr().out
     assert out.count("No later months.") == 1
     assert out.count("No earlier months.") == 1
@@ -260,19 +272,66 @@ def test_browse_stops_at_both_ends_and_keeps_the_window_length(capsys):
 
 def test_browse_shows_everything_and_rejects_other_keys(capsys):
     months = year_of_months()
-    browse(months, pick_months(months, last=3), ask=answers("x", "a", "q", "<"))
+    browse(months, pick_months(months, last=3), ask=answers("x", "a", "q", "<"), in_place=False)
     out = capsys.readouterr().out
     assert "Type <, >, a or q." in out
-    assert [line for line in out.splitlines() if line.startswith("Monthly history")] == ["Monthly history"]
+    assert [line for line in out.splitlines() if line.startswith("Monthly history")][-1] == "Monthly history"
 
 
 def test_browse_asks_nothing_when_the_whole_history_is_shown(capsys):
     months = year_of_months()
-    browse(months, months, ask=answers())  # answers() raises if asked twice; here it is never asked
-    assert capsys.readouterr().out == ""
+    browse(months, months, ask=answers(), in_place=False)  # answers() would raise if asked
+    assert titles(capsys) == ["Monthly history"]
 
 
 def test_browse_from_an_empty_range_starts_at_the_newest_months(capsys):
     months = year_of_months()
-    browse(months, [], ask=answers("<"))
-    assert titles(capsys) == ["Monthly history"]  # twelve months fit in one default page
+    browse(months, [], ask=answers("<"), in_place=False)
+    assert titles(capsys) == ["Monthly history", "Monthly history"]  # no data, then all twelve months
+
+
+def tall_terminal(columns=120, rows=50):
+    return lambda: (columns, rows)
+
+
+def test_browse_in_place_erases_exactly_what_it_drew(capsys):
+    months = year_of_months()
+    browse(months, pick_months(months, last=3), ask=answers("<"), in_place=True, terminal_size=tall_terminal())
+    out = capsys.readouterr().out
+    # Drawn: title, header and 3 months are 5 rows, plus the prompt line.
+    assert "\x1b[6F\x1b[J" in out
+    assert out.count("Monthly history") == 2
+
+
+def test_browse_in_place_counts_the_status_line_when_erasing(capsys):
+    months = year_of_months()
+    browse(months, pick_months(months, last=3), ask=answers(">", ">"), in_place=True, terminal_size=tall_terminal())
+    out = capsys.readouterr().out
+    assert out.count("No later months.") == 2
+    assert "\x1b[6F" in out and "\x1b[7F" in out  # the second erase also covers the first message
+
+
+def test_browse_in_place_leaves_only_the_table_when_quitting(capsys):
+    months = year_of_months()
+    browse(months, pick_months(months, last=3), ask=answers("x", "q"), in_place=True, terminal_size=tall_terminal())
+    out = capsys.readouterr().out
+    assert "Type <, >, a or q." in out
+    # What is drawn after the last erase is the table alone: no message, no prompt.
+    final = out.rsplit("\x1b[J", 1)[1]
+    assert final.startswith("Monthly history (2026-10 to 2026-12, 3 of 12 months)")
+    assert "Type" not in final
+
+
+def test_browse_does_not_erase_what_no_longer_fits_on_the_screen(capsys):
+    months = year_of_months()
+    browse(months, pick_months(months, last=3), ask=answers("<"), in_place=True, terminal_size=tall_terminal(rows=6))
+    out = capsys.readouterr().out
+    assert "\x1b[" not in out
+    assert "Monthly history (2026-07 to 2026-09, 3 of 12 months)" in out
+
+
+def test_screen_rows_counts_wrapped_lines_and_wide_characters():
+    assert screen_rows("abc\ndef", 80) == 2
+    assert screen_rows("a" * 81, 80) == 2
+    assert screen_rows("한" * 41, 80) == 2  # 41 Korean characters are 82 columns
+    assert screen_rows("", 80) == 1

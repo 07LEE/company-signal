@@ -14,8 +14,9 @@ from .lookup import (
     WarehouseMissing,
     browse,
     choose,
-    format_detail,
     format_hits,
+    format_notes,
+    format_summary,
     load_detail,
     open_warehouse,
     pick_months,
@@ -106,9 +107,11 @@ def cmd_search(args: argparse.Namespace) -> int:
         print()
         workplace, months = load_detail(con, selected.workplace_id)
         shown = pick_months(months, last=args.months, start=args.start, end=args.end)
-        print(format_detail(workplace, months, shown))
+        print(format_summary(workplace, months))
         print()
         browse(months, shown)
+        print()
+        print(format_notes(workplace, months))
     except (EOFError, KeyboardInterrupt):
         print()
         return 130

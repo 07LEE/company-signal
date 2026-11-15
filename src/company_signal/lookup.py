@@ -5,6 +5,9 @@ The lookup never calls the API. It only reads the local mart tables.
 
 from __future__ import annotations
 
+import os
+import shutil
+import sys
 import unicodedata
 from dataclasses import dataclass
 from datetime import date
@@ -188,10 +191,8 @@ def format_history(months: list[dict], shown: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def format_detail(workplace: dict, months: list[dict], shown: list[dict] | None = None) -> str:
-    """The whole detail view. `shown` is the part of the history to list; by default the latest months."""
-    if shown is None:
-        shown = pick_months(months)
+def format_summary(workplace: dict, months: list[dict]) -> str:
+    """Who the workplace is and its latest month. This part stays put while the history is paged."""
     latest = months[-1]
     month_count = workplace["months_observed"]
     lines = [
@@ -224,10 +225,11 @@ def format_detail(workplace: dict, months: list[dict], shown: list[dict] | None 
     else:
         lines.append(f"  {'12-month attrition':<26}{'-':>12}   needs 12 months of data")
 
-    lines += ["", format_history(months, shown)]
+    return "\n".join(lines)
 
-    lines += [
-        "",
+
+def format_notes(workplace: dict, months: list[dict]) -> str:
+    lines = [
         "Notes",
         "  - Source: National Pension Service workplace data (data.go.kr 15083277), monthly.",
         '  - "joined" and "left" include resumed and suspended payments, so they are not',
@@ -250,43 +252,100 @@ def format_detail(workplace: dict, months: list[dict], shown: list[dict] | None 
 BROWSE_PROMPT = "[<] older  [>] newer  [a] all  [q] quit: "
 
 
-def browse(months: list[dict], shown: list[dict], ask=input) -> None:
-    """Page through the history after the detail view has been printed.
+def screen_rows(text: str, columns: int) -> int:
+    """Terminal rows a block of text takes, counting lines too wide for the terminal."""
+    return sum(max(1, -(-display_width(line) // columns)) for line in text.split("\n"))
+
+
+def browse(
+    months: list[dict],
+    shown: list[dict],
+    ask=input,
+    in_place: bool | None = None,
+    terminal_size=shutil.get_terminal_size,
+) -> None:
+    """Print the history table, then let the user page through it.
 
     `<` and `>` move the window by its own length toward older or newer months,
     `a` shows everything, and `q`, Enter or end of input leaves. Nothing is
     asked when the whole history is already on screen.
+
+    On a terminal the table is redrawn where it stands, so the summary above
+    stays in view. That needs the cursor to move back up over what was drawn,
+    which only works while the table fits on the screen; a longer table is
+    printed below instead, as it also is when the output is not a terminal.
+    Only the table and the prompt are redrawn, to keep that part short: the
+    caller prints the notes once paging is over.
     """
-    if len(shown) >= len(months):
-        return
+    if in_place is None:
+        in_place = sys.stdout.isatty() and os.environ.get("TERM") != "dumb"
+
     size = len(shown) or DEFAULT_MONTHS
     # The window is months[low:high]. An empty selection starts past the newest month.
     low = next((i for i, m in enumerate(months) if shown and m is shown[0]), len(months))
     high = low + len(shown)
 
+    def block() -> str:
+        return format_history(months, months[low:high])
+
+    drawn = block()  # What is on screen right above the prompt, or None if it cannot be erased.
+    print(drawn)
+    if len(shown) >= len(months):
+        return
+
+    def erase_drawn(status_shown: str) -> bool:
+        """Clear the table, a status line and the prompt line, if they can still be reached."""
+        columns, rows = terminal_size()
+        if not in_place or drawn is None:
+            return False
+        # Rows between the top of the table and the cursor: the table, a status line, the prompt line.
+        used = screen_rows(drawn, columns) + (1 if status_shown else 0) + 1
+        if used >= rows:
+            return False
+        # Go up to the first drawn row and clear from there to the end of the screen.
+        print(f"\x1b[{used}F\x1b[J", end="")
+        return True
+
+    status = ""
     while True:
         try:
             answer = ask(BROWSE_PROMPT).strip().lower()
         except EOFError:
             return
         if answer in ("", "q"):
+            # Leave only the table behind, without the prompt or a leftover message.
+            if erase_drawn(status):
+                print(drawn)
             return
+
+        previous_status, status = status, ""
         if answer == "<":
             if low == 0:
-                print("No earlier months.")
-                continue
-            low = max(0, low - size)
-            high = min(len(months), low + size)
+                status = "No earlier months."
+            else:
+                low = max(0, low - size)
+                high = min(len(months), low + size)
         elif answer == ">":
             if high >= len(months):
-                print("No later months.")
-                continue
-            high = min(len(months), high + size)
-            low = max(0, high - size)
+                status = "No later months."
+            else:
+                high = min(len(months), high + size)
+                low = max(0, high - size)
         elif answer == "a":
             low, high = 0, len(months)
         else:
-            print("Type <, >, a or q.")
-            continue
-        print()
-        print(format_history(months, months[low:high]))
+            status = "Type <, >, a or q."
+
+        if erase_drawn(previous_status):
+            drawn = block()
+            print(drawn)
+            if status:
+                print(status)
+        elif in_place and not status:
+            # Too tall to erase: start a fresh copy below, which the next key can replace if it fits.
+            drawn = block()
+            print()
+            print(drawn)
+        else:
+            drawn = None
+            print(status if status else "\n" + block())
