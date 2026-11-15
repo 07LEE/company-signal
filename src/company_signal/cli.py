@@ -141,7 +141,7 @@ def fetch_live_history(settings: Settings, live, workplace_id: str, args: argpar
 
     client = Client(settings.service_key)
     try:
-        stopped = fetch_history(client, live, workplace_id, args.months, args.start, progress)
+        stopped = fetch_history(client, live, workplace_id, args.months, args.start, progress, Store(settings.db_path))
     finally:
         client.close()
     if shown:
@@ -183,8 +183,10 @@ def cmd_search(args: argparse.Namespace) -> int:
                 hits, total = search(con, name, args.limit)
         if not hits and settings.service_key:
             client = Client(settings.service_key)
+            store = Store(settings.db_path)
+            store.init()
             try:
-                live = search_live(client, name, announce=lambda: print("Not in the collected data; searching the pension API..."))
+                live = search_live(client, name, store, announce=lambda: print("Not in the collected data; searching the pension API..."))
             except FetchError as exc:
                 print(f"Could not search the pension API: {exc}", file=sys.stderr)
                 return 1
@@ -192,7 +194,8 @@ def cmd_search(args: argparse.Namespace) -> int:
                 client.close()
             if live is not None:
                 hits, total = search(live.con, name, args.limit)
-                print(f"Live lookup of {live.base_ym}, the latest month only. Nothing is stored.")
+                origin = "a stored answer" if live.answers_reused else "the API"
+                print(f"Live lookup of {live.base_ym}, the latest month, from {origin}.")
                 if live.truncated:
                     print(f"The API found {live.match_count:,} workplaces; only the first {live.fetched:,} were read. Search with a longer name.")
         print(format_hits(hits, total, name))
@@ -221,7 +224,10 @@ def cmd_search(args: argparse.Namespace) -> int:
         print()
         print(format_notes(workplace, months))
         if live:
-            print(f"  - Fetched from the pension API for this search: {live.span}. Nothing is stored.")
+            print(
+                f"  - Live lookup of {live.span}: {live.calls_made} API calls, {live.answers_reused} stored answers reused."
+                f" Answers are kept in {settings.db_path.name} for next time."
+            )
     except WarehouseMissing as exc:
         print(exc, file=sys.stderr)
         return 1

@@ -59,6 +59,31 @@ CREATE TABLE IF NOT EXISTS raw.fsc_corp_outline_page (
     PRIMARY KEY (query_name, page)
 );
 
+-- Answers to the conditional queries of a live lookup, one row per query.
+-- A publication never changes, so an answer stays valid for good.
+CREATE TABLE IF NOT EXISTS meta.nps_live_query (
+    publication_id VARCHAR NOT NULL,
+    column_name    VARCHAR NOT NULL,
+    operator       VARCHAR NOT NULL,   -- LIKE or EQ
+    value          VARCHAR NOT NULL,
+    match_count    INTEGER NOT NULL,
+    pages_fetched  INTEGER NOT NULL,
+    fetched_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (publication_id, column_name, operator, value)
+);
+
+-- The pages of those answers, exactly as received. Kept apart from the
+-- collected publications so the dbt build only ever sees whole publications.
+CREATE TABLE IF NOT EXISTS raw.nps_live_page (
+    publication_id VARCHAR NOT NULL,
+    column_name    VARCHAR NOT NULL,
+    operator       VARCHAR NOT NULL,
+    value          VARCHAR NOT NULL,
+    page           INTEGER NOT NULL,
+    body           VARCHAR NOT NULL,
+    PRIMARY KEY (publication_id, column_name, operator, value, page)
+);
+
 -- Source records, kept as received. Column names differ by period, so they stay as JSON.
 CREATE TABLE IF NOT EXISTS raw.nps_workplace_record (
     publication_id VARCHAR NOT NULL,
@@ -248,6 +273,51 @@ class Store:
                     VALUES (?, ?, ?, ?)
                     """,
                     [query_name, total_count, len(pages), truncated],
+                )
+                con.execute("COMMIT")
+            except Exception:
+                con.execute("ROLLBACK")
+                raise
+
+    def nps_live_pages(self, publication_id: str, column_name: str, operator: str, value: str) -> list[str] | None:
+        """A stored answer to one conditional query, page by page; None if never asked."""
+        with self.connect() as con:
+            try:
+                asked = con.execute(
+                    "SELECT 1 FROM meta.nps_live_query WHERE publication_id = ? AND column_name = ? AND operator = ? AND value = ?",
+                    [publication_id, column_name, operator, value],
+                ).fetchone()
+            except duckdb.CatalogException:
+                return None  # a database made before live lookups were stored
+            if not asked:
+                return None
+            rows = con.execute(
+                """
+                SELECT body FROM raw.nps_live_page
+                WHERE publication_id = ? AND column_name = ? AND operator = ? AND value = ?
+                ORDER BY page
+                """,
+                [publication_id, column_name, operator, value],
+            ).fetchall()
+        return [row[0] for row in rows]
+
+    def record_nps_live_answer(
+        self, publication_id: str, column_name: str, operator: str, value: str, pages: list[str], match_count: int
+    ) -> None:
+        key = [publication_id, column_name, operator, value]
+        with self.connect() as con:
+            con.execute("BEGIN")
+            try:
+                con.execute(
+                    "DELETE FROM raw.nps_live_page WHERE publication_id = ? AND column_name = ? AND operator = ? AND value = ?", key
+                )
+                con.executemany(
+                    "INSERT INTO raw.nps_live_page VALUES (?, ?, ?, ?, ?, ?)",
+                    [(*key, number, body) for number, body in enumerate(pages, 1)],
+                )
+                con.execute(
+                    "INSERT OR REPLACE INTO meta.nps_live_query (publication_id, column_name, operator, value, match_count, pages_fetched) VALUES (?, ?, ?, ?, ?, ?)",
+                    [*key, match_count, len(pages)],
                 )
                 con.execute("COMMIT")
             except Exception:

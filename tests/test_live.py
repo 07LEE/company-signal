@@ -126,3 +126,57 @@ def test_history_takes_only_the_months_asked_for():
     seen.clear()
     fetch_history(client, live, wid, months=2)
     assert [s for s, _ in seen] == ["20260923"]  # the latest month is already there
+
+
+def conditional_calls(seen):
+    return [s for s in seen if s[1]]
+
+
+def test_a_stored_answer_is_reused_and_not_asked_again(tmp_path):
+    from company_signal.live import fetch_history
+    from company_signal.store import Store
+
+    store = Store(tmp_path / "company_signal.duckdb")
+    store.init()
+    months = ["20261022", "20260923", "20211118", "20211022"]
+
+    seen = []
+    client = history_client(months, seen)
+    live = search_live(client, "한빛", store)
+    wid = live.con.execute("select workplace_id from mart.mart_workplace").fetchone()[0]
+    fetch_history(client, live, wid, months=None, store=store)
+    first = conditional_calls(seen)
+    assert live.calls_made == len(first) == 5  # one name search, three months, one failed column name
+    assert live.answers_reused == 0
+
+    seen.clear()
+    client = history_client(months, seen)
+    again = search_live(client, "한빛", store)
+    fetch_history(client, again, wid, months=None, store=store)
+    assert conditional_calls(seen) == []  # only the list of publications is asked for
+    assert again.answers_reused == 4 and again.calls_made == 0
+    assert again.months_fetched == live.months_fetched
+
+
+def test_after_a_new_month_only_the_new_queries_are_asked(tmp_path):
+    from company_signal.live import fetch_history
+    from company_signal.store import Store
+
+    store = Store(tmp_path / "company_signal.duckdb")
+    store.init()
+    seen = []
+    client = history_client(["20260923", "20260825"], seen)
+    live = search_live(client, "한빛", store)
+    wid = live.con.execute("select workplace_id from mart.mart_workplace").fetchone()[0]
+    fetch_history(client, live, wid, months=None, store=store)
+
+    # A month later the API has one more publication.
+    seen.clear()
+    client = history_client(["20261022", "20260923", "20260825"], seen)
+    live = search_live(client, "한빛", store)
+    fetch_history(client, live, wid, months=None, store=store)
+    # The new latest month is searched by name. The month before was the latest
+    # last time, so it was searched by name then; now it is asked by number once.
+    # The oldest month comes from the store.
+    assert [stamp for stamp, cond in conditional_calls(seen)] == ["20261022", "20260923"]
+    assert live.answers_reused == 1
