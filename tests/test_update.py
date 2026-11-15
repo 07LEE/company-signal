@@ -8,7 +8,7 @@ from company_signal.pipeline import DISCLOSURE_MODELS, BuildResult, StepFailed, 
 
 NOTHING_COLLECTED = CollectResult(publications_completed=0, pages_fetched=0)
 NOTHING_ASKED = EnrichResult(names_asked=0, calls=0, names_left=0, limit_reached=False)
-BUILT = BuildResult(success=True, passed=40, failed=0, other=0)
+BUILT = BuildResult(success=True, passed=40, warned=0, failed=0, other=0)
 
 
 def fake_steps(calls, collected=NOTHING_COLLECTED, enriched=NOTHING_ASKED, built=BUILT, warehouse=True):
@@ -67,12 +67,12 @@ def test_a_failed_step_stops_the_steps_after_it():
     assert failed.value.args[0] == ["collect: stopped, HTTP 503"]
 
     calls.clear()
-    broken = BuildResult(success=False, passed=30, failed=2, other=8)
+    broken = BuildResult(success=False, passed=30, warned=1, failed=2, other=8)
     collected = CollectResult(publications_completed=1, pages_fetched=10)
     with pytest.raises(StepFailed) as failed:
         update(fake_steps(calls, collected=collected, built=broken), log=lambda _: None)
     assert calls == [("collect",), ("build", None)]  # no enrich over a broken build
-    assert failed.value.args[0][-1].startswith("build: 30 passed, 2 failed, 8 other")
+    assert failed.value.args[0][-1].startswith("build: 30 passed, 1 warned, 2 failed, 8 other")
 
 
 def test_run_dbt_leaves_the_warehouse_free_for_the_next_step(tmp_path):
@@ -89,7 +89,7 @@ def test_run_dbt_leaves_the_warehouse_free_for_the_next_step(tmp_path):
     data.mkdir()
 
     result = run_dbt(project, data)
-    assert result == BuildResult(success=True, passed=1, failed=0, other=0)
+    assert result == BuildResult(success=True, passed=1, warned=0, failed=0, other=0)
     con = duckdb.connect(str(data / "warehouse.duckdb"), read_only=True)
     assert con.execute("select x from one").fetchone() == (1,)
     con.close()

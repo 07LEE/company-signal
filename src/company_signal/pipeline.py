@@ -1,7 +1,7 @@
 """One command that brings everything up to date: collect, build, enrich, build.
 
-The steps run in one process, one after another, so no step finds the database
-locked by another. Each step resumes where an earlier run stopped, so after a
+The steps run one after another, so no step finds the database locked by
+another. Each step resumes where an earlier run stopped, so after a
 failure the same command is simply run again.
 """
 
@@ -23,6 +23,7 @@ from .enrich import EnrichResult
 DISCLOSURE_MODELS = "stg_fsc__corp_outline+"
 
 PASSED = {"success", "pass"}
+WARNED = {"warn"}
 FAILED = {"error", "fail", "runtime error"}
 
 
@@ -31,7 +32,8 @@ class BuildResult:
     success: bool
     passed: int  # models built and tests passed
     failed: int
-    other: int  # skipped or warned
+    warned: int  # tests that found something worth a look but do not fail the build
+    other: int  # skipped
 
 
 @dataclass(frozen=True)
@@ -67,8 +69,9 @@ def run_dbt(project_dir: Path, data_dir: Path, select: str | None = None) -> Bui
     return BuildResult(
         success=finished.returncode == 0,
         passed=sum(s in PASSED for s in statuses),
+        warned=sum(s in WARNED for s in statuses),
         failed=sum(s in FAILED for s in statuses),
-        other=sum(s not in PASSED and s not in FAILED for s in statuses),
+        other=sum(s not in PASSED | WARNED | FAILED for s in statuses),
     )
 
 
@@ -91,7 +94,7 @@ def update(steps: Steps, force_build: bool = False, log=print) -> list[str]:
 
     def build(name: str, select: str | None) -> None:
         result, took = timed(name, lambda: steps.build(select))
-        line = f"{name}: {result.passed} passed, {result.failed} failed, {result.other} other, {took}"
+        line = f"{name}: {result.passed} passed, {result.warned} warned, {result.failed} failed, {result.other} other, {took}"
         summary.append(line)
         if not result.success:
             raise StepFailed(summary)

@@ -332,6 +332,25 @@ create or replace macro nps_workplace_months(row_table, selected_table) as table
     from by_key as k
     inner join lineage as l using (workplace_id);
 
+-- nps_month_profile: one row per base month with the totals a new publication
+-- is checked against: how many workplaces and subscribers it has, and how
+-- often the descriptive columns are empty. A publication that arrives broken,
+-- cut short or with a renamed column shows up here as a jump.
+--
+-- month_table has the rows of nps_workplace_months.
+create or replace macro nps_month_profile(month_table) as table
+    select
+        base_ym,
+        count(*)::integer as workplace_count,
+        sum(subscriber_count)::bigint as subscriber_count,
+        sum(new_subscriber_count)::bigint as new_subscriber_count,
+        sum(lost_subscriber_count)::bigint as lost_subscriber_count,
+        sum(source_row_count)::bigint as source_row_count,
+        avg((road_address is null)::integer) as road_address_missing_share,
+        avg((industry_code is null)::integer) as industry_code_missing_share
+    from query_table(month_table)
+    group by base_ym;
+
 -- nps_monthly: Monthly indicators per workplace.
 --
 -- Rates use the previous month's subscriber count, and only when the previous
