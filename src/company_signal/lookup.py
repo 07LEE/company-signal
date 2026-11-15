@@ -18,7 +18,8 @@ WORKPLACE_TYPES = {"1": "corporation", "2": "individual"}
 # rate by tens of percent, so only the counts are shown.
 MIN_HEADCOUNT_FOR_RATES = 5
 
-HISTORY_MONTHS = 13
+# Months of history shown when no range is asked for.
+DEFAULT_MONTHS = 13
 
 
 class WarehouseMissing(RuntimeError):
@@ -128,7 +129,7 @@ def choose(hits: list[WorkplaceHit], ask=input) -> WorkplaceHit | None:
 
 
 def load_detail(con: duckdb.DuckDBPyConnection, workplace_id: str) -> tuple[dict, list[dict]]:
-    """One workplace and its latest months, oldest first."""
+    """One workplace and all of its months, oldest first."""
 
     def rows(sql: str, params: list) -> list[dict]:
         cursor = con.execute(sql, params)
@@ -139,15 +140,26 @@ def load_detail(con: duckdb.DuckDBPyConnection, workplace_id: str) -> tuple[dict
     if not workplace:
         raise LookupError(f"no workplace with id {workplace_id}")
     months = rows(
-        """
-        select * from (
-            select * from mart.mart_workplace_monthly
-            where workplace_id = ? order by base_ym desc limit ?
-        ) order by base_ym
-        """,
-        [workplace_id, HISTORY_MONTHS],
+        "select * from mart.mart_workplace_monthly where workplace_id = ? order by base_ym",
+        [workplace_id],
     )
     return workplace[0], months
+
+
+def pick_months(
+    months: list[dict],
+    last: int | None = DEFAULT_MONTHS,
+    start: date | None = None,
+    end: date | None = None,
+) -> list[dict]:
+    """The part of the history to show.
+
+    A start or end month selects a range and `last` is ignored. Otherwise the
+    latest `last` months are taken; None means all of them.
+    """
+    if start or end:
+        return [m for m in months if (not start or m["base_ym"] >= start) and (not end or m["base_ym"] <= end)]
+    return months if last is None else months[-last:]
 
 
 def shown_rate(rate: float | None, previous_count: int | None) -> str | None:
@@ -157,7 +169,29 @@ def shown_rate(rate: float | None, previous_count: int | None) -> str | None:
     return f"{rate * 100:.1f}%"
 
 
-def format_detail(workplace: dict, months: list[dict]) -> str:
+def format_history(months: list[dict], shown: list[dict]) -> str:
+    """The monthly table for the months in `shown`, out of the whole history `months`."""
+    if not shown:
+        return "Monthly history\n  No data in this range."
+    title = "Monthly history"
+    if len(shown) < len(months):
+        title += f" ({shown[0]['base_ym']:%Y-%m} to {shown[-1]['base_ym']:%Y-%m}, {len(shown)} of {len(months)} months)"
+    lines = [title, f"  {'month':<8}{'subscribers':>12}{'joined':>8}{'left':>7}{'join %':>9}{'leave %':>9}{'est. income':>14}"]
+    for m in shown:
+        previous = m["previous_subscriber_count"]
+        income = m["est_avg_monthly_income"]
+        lines.append(
+            f"  {m['base_ym']:%Y-%m} {m['subscriber_count']:>12,}{m['new_subscriber_count']:>8,}{m['lost_subscriber_count']:>7,}"
+            f"{shown_rate(m['hire_rate'], previous) or '-':>9}{shown_rate(m['attrition_rate'], previous) or '-':>9}"
+            f"{f'{income:,}' if income is not None else '-':>14}"
+        )
+    return "\n".join(lines)
+
+
+def format_detail(workplace: dict, months: list[dict], shown: list[dict] | None = None) -> str:
+    """The whole detail view. `shown` is the part of the history to list; by default the latest months."""
+    if shown is None:
+        shown = pick_months(months)
     latest = months[-1]
     month_count = workplace["months_observed"]
     lines = [
@@ -190,15 +224,7 @@ def format_detail(workplace: dict, months: list[dict]) -> str:
     else:
         lines.append(f"  {'12-month attrition':<26}{'-':>12}   needs 12 months of data")
 
-    lines += ["", "Monthly history", f"  {'month':<8}{'subscribers':>12}{'joined':>8}{'left':>7}{'join %':>9}{'leave %':>9}{'est. income':>14}"]
-    for m in months:
-        previous = m["previous_subscriber_count"]
-        income = m["est_avg_monthly_income"]
-        lines.append(
-            f"  {m['base_ym']:%Y-%m} {m['subscriber_count']:>12,}{m['new_subscriber_count']:>8,}{m['lost_subscriber_count']:>7,}"
-            f"{shown_rate(m['hire_rate'], previous) or '-':>9}{shown_rate(m['attrition_rate'], previous) or '-':>9}"
-            f"{f'{income:,}' if income is not None else '-':>14}"
-        )
+    lines += ["", format_history(months, shown)]
 
     lines += [
         "",

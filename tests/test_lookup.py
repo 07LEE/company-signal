@@ -5,7 +5,17 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from company_signal.lookup import choose, display_width, fit, format_detail, format_hits, search, shown_rate
+from company_signal.lookup import (
+    choose,
+    display_width,
+    fit,
+    format_detail,
+    format_history,
+    format_hits,
+    pick_months,
+    search,
+    shown_rate,
+)
 
 MACRO_FILE = Path(__file__).parent.parent / "transform" / "macros" / "create_functions.sql"
 
@@ -185,3 +195,38 @@ def test_detail_notes_merged_rows_and_departed_workplaces():
 )
 def test_normalize_name(warehouse, name, expected):
     assert warehouse.execute("select normalize_name(?)", [name]).fetchone()[0] == expected
+
+
+def year_of_months():
+    """Twelve months, 2026-01 to 2026-12, of a workplace of 100."""
+    return [month(date(2026, n, 1), 100, 1, 1, 100 if n > 1 else None) for n in range(1, 13)]
+
+
+def test_pick_months_takes_the_latest_by_default_or_everything():
+    months = year_of_months()
+    assert [m["base_ym"].month for m in pick_months(months, last=3)] == [10, 11, 12]
+    assert pick_months(months, last=None) == months
+    assert pick_months(months, last=99) == months
+
+
+def test_pick_months_by_range_ignores_the_count():
+    months = year_of_months()
+    picked = pick_months(months, last=2, start=date(2026, 3, 1), end=date(2026, 5, 1))
+    assert [m["base_ym"].month for m in picked] == [3, 4, 5]
+    assert [m["base_ym"].month for m in pick_months(months, start=date(2026, 11, 1))] == [11, 12]
+    assert [m["base_ym"].month for m in pick_months(months, end=date(2026, 2, 1))] == [1, 2]
+
+
+def test_history_title_says_when_only_part_is_shown():
+    months = year_of_months()
+    assert format_history(months, months).splitlines()[0] == "Monthly history"
+    partial = format_history(months, pick_months(months, last=3))
+    assert partial.splitlines()[0] == "Monthly history (2026-10 to 2026-12, 3 of 12 months)"
+    assert "No data in this range." in format_history(months, [])
+
+
+def test_detail_summarises_the_latest_month_even_when_an_older_range_is_shown():
+    months = year_of_months()
+    text = format_detail(workplace(months_observed=12), months, pick_months(months, end=date(2026, 2, 1)))
+    assert "Latest month: 2026-12" in text
+    assert "Monthly history (2026-01 to 2026-02, 2 of 12 months)" in text
