@@ -36,3 +36,23 @@ models:
         data_tests: [not_null]
       - name: contribution_rate
         data_tests: [not_null]
+
+  - name: mart_workplace_yearly
+    columns:
+      - name: workplace_id
+        data_tests: [not_null]
+      - name: base_year
+        data_tests: [not_null]
+      - name: months_observed
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+                quote: false
+
+  - name: mart_workplace_overall
+    columns:
+      - name: workplace_id
+        data_tests: [unique, not_null]
+      - name: months_observed
+        data_tests: [not_null]

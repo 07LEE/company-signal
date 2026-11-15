@@ -5,6 +5,9 @@ The lookup never calls the API. It only reads the local mart tables.
 
 from __future__ import annotations
 
+import os
+import shutil
+import sys
 import unicodedata
 from dataclasses import dataclass
 from datetime import date
@@ -18,7 +21,8 @@ WORKPLACE_TYPES = {"1": "corporation", "2": "individual"}
 # rate by tens of percent, so only the counts are shown.
 MIN_HEADCOUNT_FOR_RATES = 5
 
-HISTORY_MONTHS = 13
+# Months of history shown when no range is asked for.
+DEFAULT_MONTHS = 13
 
 
 class WarehouseMissing(RuntimeError):
@@ -128,7 +132,7 @@ def choose(hits: list[WorkplaceHit], ask=input) -> WorkplaceHit | None:
 
 
 def load_detail(con: duckdb.DuckDBPyConnection, workplace_id: str) -> tuple[dict, list[dict]]:
-    """One workplace and its latest months, oldest first."""
+    """One workplace and all of its months, oldest first."""
 
     def rows(sql: str, params: list) -> list[dict]:
         cursor = con.execute(sql, params)
@@ -139,15 +143,48 @@ def load_detail(con: duckdb.DuckDBPyConnection, workplace_id: str) -> tuple[dict
     if not workplace:
         raise LookupError(f"no workplace with id {workplace_id}")
     months = rows(
-        """
-        select * from (
-            select * from mart.mart_workplace_monthly
-            where workplace_id = ? order by base_ym desc limit ?
-        ) order by base_ym
-        """,
-        [workplace_id, HISTORY_MONTHS],
+        "select * from mart.mart_workplace_monthly where workplace_id = ? order by base_ym",
+        [workplace_id],
     )
     return workplace[0], months
+
+
+def load_years(con: duckdb.DuckDBPyConnection, workplace_id: str) -> list[dict]:
+    """The yearly rows of one workplace, oldest first. Empty if the warehouse has no yearly table yet."""
+    try:
+        cursor = con.execute(
+            "select * from mart.mart_workplace_yearly where workplace_id = ? order by base_year", [workplace_id]
+        )
+    except duckdb.CatalogException:
+        return []
+    columns = [d[0] for d in cursor.description]
+    return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+
+def load_overall(con: duckdb.DuckDBPyConnection, workplace_id: str) -> dict | None:
+    """The whole-period row of one workplace. None if the warehouse has no such table yet."""
+    try:
+        cursor = con.execute("select * from mart.mart_workplace_overall where workplace_id = ?", [workplace_id])
+    except duckdb.CatalogException:
+        return None
+    row = cursor.fetchone()
+    return dict(zip([d[0] for d in cursor.description], row)) if row else None
+
+
+def pick_months(
+    months: list[dict],
+    last: int | None = DEFAULT_MONTHS,
+    start: date | None = None,
+    end: date | None = None,
+) -> list[dict]:
+    """The part of the history to show.
+
+    A start or end month selects a range and `last` is ignored. Otherwise the
+    latest `last` months are taken; None means all of them.
+    """
+    if start or end:
+        return [m for m in months if (not start or m["base_ym"] >= start) and (not end or m["base_ym"] <= end)]
+    return months if last is None else months[-last:]
 
 
 def shown_rate(rate: float | None, previous_count: int | None) -> str | None:
@@ -157,7 +194,119 @@ def shown_rate(rate: float | None, previous_count: int | None) -> str | None:
     return f"{rate * 100:.1f}%"
 
 
-def format_detail(workplace: dict, months: list[dict]) -> str:
+def format_history(months: list[dict], shown: list[dict]) -> str:
+    """The monthly table for the months in `shown`, out of the whole history `months`."""
+    if not shown:
+        return "Monthly history\n  No data in this range."
+    title = "Monthly history"
+    if len(shown) < len(months):
+        title += f" ({shown[0]['base_ym']:%Y-%m} to {shown[-1]['base_ym']:%Y-%m}, {len(shown)} of {len(months)} months)"
+    lines = [title, f"  {'month':<8}{'subscribers':>12}{'joined':>8}{'left':>7}{'join %':>9}{'leave %':>9}{'est. income':>14}"]
+    for m in shown:
+        previous = m["previous_subscriber_count"]
+        income = m["est_avg_monthly_income"]
+        lines.append(
+            f"  {m['base_ym']:%Y-%m} {m['subscriber_count']:>12,}{m['new_subscriber_count']:>8,}{m['lost_subscriber_count']:>7,}"
+            f"{shown_rate(m['hire_rate'], previous) or '-':>9}{shown_rate(m['attrition_rate'], previous) or '-':>9}"
+            f"{f'{income:,}' if income is not None else '-':>14}"
+        )
+    return "\n".join(lines)
+
+
+def format_yearly(years: list[dict]) -> str:
+    """One line per calendar year. A year with fewer than 12 months of data is marked, not scaled up."""
+    lines = [
+        "Yearly report",
+        f"  {'year':<6}{'months':>6}{'avg staff':>11}{'start':>8}{'end':>8}{'joined':>8}{'left':>7}"
+        f"{'attrition':>11}{'replaced':>10}{'est. income':>13}{'change':>9}",
+    ]
+    any_partial = False
+    for y in years:
+        partial = not y["is_full_year"]
+        any_partial = any_partial or partial
+        mark = "*" if partial else ""
+        staff = y["avg_subscriber_count"]
+        # The same floor as the monthly rates: too few people for a rate to mean much.
+        rates_ok = staff is not None and staff >= MIN_HEADCOUNT_FOR_RATES
+
+        def rate(value: float | None) -> str:
+            return f"{value * 100:.1f}%{mark}" if rates_ok and value is not None else "-"
+
+        income = y["est_avg_monthly_income"]
+        change = y["income_change_rate"]
+        lines.append(
+            f"  {y['base_year']:<6}{y['months_observed']:>6}{staff:>11,.0f}"
+            f"{y['first_subscriber_count']:>8,}{y['last_subscriber_count']:>8,}"
+            f"{y['new_subscriber_total']:>8,}{y['lost_subscriber_total']:>7,}"
+            f"{rate(y['attrition_rate']):>11}{rate(y['replacement_rate']):>10}"
+            f"{f'{income:,}' if income is not None else '-':>13}"
+            f"{f'{change * 100:+.1f}%' if change is not None else '-':>9}"
+        )
+    lines.append("")
+    lines.append(
+        ("  * under 12 months of data. " if any_partial else "  ")
+        + "attrition = left / avg staff, replaced = min(joined, left) / avg staff."
+    )
+    return "\n".join(lines)
+
+
+# The three spans of the summary: column title and the suffix of its columns in the overall mart.
+SPANS = (("whole period", "per_year", ""), ("last 3 years", "3y", "_3y"), ("last 12 months", "12m", "_12m"))
+
+
+def format_overall(o: dict) -> str:
+    """The whole collected period: three single figures, then three rates over three spans.
+
+    A span stays empty until every month of it has been collected.
+    """
+    count = o["months_observed"]
+    lines = [
+        f"Summary  {o['first_base_ym']:%Y-%m} to {o['last_base_ym']:%Y-%m} ({count} month{'s' if count != 1 else ''})",
+        "",
+    ]
+
+    first, last = o["first_subscriber_count"], o["last_subscriber_count"]
+    change = f"  ({(last - first) / first * 100:+.1f}%)" if first else ""
+    lines.append(f"  {'staff':<16}{first:,} to {last:,}{change}")
+    lines.append(f"  {'joined / left':<16}{o['new_subscriber_total']:,} / {o['lost_subscriber_total']:,}")
+    first_income, last_income = o["first_est_income"], o["last_est_income"]
+    if first_income is None or last_income is None:
+        lines.append(f"  {'est. income':<16}-")
+    else:
+        growth = o["income_growth_per_year"]
+        yearly = f"  ({growth * 100:+.1f}% a year)" if growth is not None else ""
+        lines.append(f"  {'est. income':<16}{first_income:,} to {last_income:,}{yearly}")
+
+    staff = o["avg_subscriber_count"]
+    too_small = staff is None or staff < MIN_HEADCOUNT_FOR_RATES
+    age = o["scheme_age_years"]
+
+    def percent(value: float | None) -> str:
+        return "-" if too_small or value is None else f"{value * 100:.1f}%"
+
+    def tenure(value: float | None) -> str:
+        if too_small or value is None:
+            return "-"
+        # Nobody can have stayed longer than the workplace has been in the scheme.
+        return f"over {age:.1f} years" if age is not None and value > age else f"{value:.1f} years"
+
+    def spans(label: str, cells: list[str]) -> None:
+        lines.append(f"  {label:<18}" + "".join(f"{cell:>16}" for cell in cells))
+
+    lines.append("")
+    spans("", [title for title, _, _ in SPANS])
+    spans("attrition / year", [percent(o[f"attrition_rate_{key}"]) for _, key, _ in SPANS])
+    spans("replaced / year", [percent(o[f"replacement_rate_{key}"]) for _, key, _ in SPANS])
+    spans("implied tenure", [tenure(o[f"implied_tenure_years{suffix}"]) for _, _, suffix in SPANS])
+
+    lines.append("")
+    reason = f"hidden below {MIN_HEADCOUNT_FOR_RATES} staff" if too_small else "needs more months"
+    lines.append(f'  "-" {reason}. Implied tenure = 1 / attrition, not a measured tenure.')
+    return "\n".join(lines)
+
+
+def format_summary(workplace: dict, months: list[dict]) -> str:
+    """Who the workplace is and its latest month. This part stays put while the history is paged."""
     latest = months[-1]
     month_count = workplace["months_observed"]
     lines = [
@@ -190,18 +339,11 @@ def format_detail(workplace: dict, months: list[dict]) -> str:
     else:
         lines.append(f"  {'12-month attrition':<26}{'-':>12}   needs 12 months of data")
 
-    lines += ["", "Monthly history", f"  {'month':<8}{'subscribers':>12}{'joined':>8}{'left':>7}{'join %':>9}{'leave %':>9}{'est. income':>14}"]
-    for m in months:
-        previous = m["previous_subscriber_count"]
-        income = m["est_avg_monthly_income"]
-        lines.append(
-            f"  {m['base_ym']:%Y-%m} {m['subscriber_count']:>12,}{m['new_subscriber_count']:>8,}{m['lost_subscriber_count']:>7,}"
-            f"{shown_rate(m['hire_rate'], previous) or '-':>9}{shown_rate(m['attrition_rate'], previous) or '-':>9}"
-            f"{f'{income:,}' if income is not None else '-':>14}"
-        )
+    return "\n".join(lines)
 
-    lines += [
-        "",
+
+def format_notes(workplace: dict, months: list[dict]) -> str:
+    lines = [
         "Notes",
         "  - Source: National Pension Service workplace data (data.go.kr 15083277), monthly.",
         '  - "joined" and "left" include resumed and suspended payments, so they are not',
@@ -219,3 +361,138 @@ def format_detail(workplace: dict, months: list[dict]) -> str:
             " below the size that is published."
         )
     return "\n".join(lines)
+
+
+MONTHLY_KEYS = "[<] older  [>] newer  [a] all"
+
+
+def screen_rows(text: str, columns: int) -> int:
+    """Terminal rows a block of text takes, counting lines too wide for the terminal."""
+    return sum(max(1, -(-display_width(line) // columns)) for line in text.split("\n"))
+
+
+def browse(
+    months: list[dict],
+    shown: list[dict],
+    years: list[dict] | None = None,
+    overall: dict | None = None,
+    ask=input,
+    in_place: bool | None = None,
+    terminal_size=shutil.get_terminal_size,
+) -> None:
+    """Print the history table, then let the user page through it or switch views.
+
+    In the monthly view `<` and `>` move the window by its own length toward
+    older or newer months and `a` shows everything. `y` switches to the yearly
+    report and `s` to the whole-period summary, when the caller has them, and
+    `m` goes back to the months. `q`, Enter or end of input leaves. Nothing is
+    asked when there is nothing else to show: the whole history is on screen
+    and there is no other view.
+
+    On a terminal the table is redrawn where it stands, so the summary above
+    stays in view. That needs the cursor to move back up over what was drawn,
+    which only works while the table fits on the screen; a longer table is
+    printed below instead, as it also is when the output is not a terminal.
+    Only the table and the prompt are redrawn, to keep that part short: the
+    caller prints the notes once paging is over.
+    """
+    if in_place is None:
+        in_place = sys.stdout.isatty() and os.environ.get("TERM") != "dumb"
+
+    size = len(shown) or DEFAULT_MONTHS
+    # The window is months[low:high]. An empty selection starts past the newest month.
+    low = next((i for i, m in enumerate(months) if shown and m is shown[0]), len(months))
+    high = low + len(shown)
+
+    view = "monthly"
+    # Key -> (view, label), for the views there is data for.
+    views = {"m": ("monthly", "monthly")}
+    if years:
+        views["y"] = ("yearly", "yearly")
+    if overall:
+        views["s"] = ("summary", "summary")
+
+    def block() -> str:
+        if view == "yearly":
+            return format_yearly(years)
+        if view == "summary":
+            return format_overall(overall)
+        return format_history(months, months[low:high])
+
+    def other_views() -> list[tuple[str, str]]:
+        return [(key, label) for key, (name, label) in views.items() if name != view]
+
+    def prompt() -> str:
+        keys = [MONTHLY_KEYS] if view == "monthly" else []
+        keys += [f"[{key}] {label}" for key, label in other_views()]
+        return "  ".join(keys + ["[q] quit: "])
+
+    def valid_keys() -> str:
+        keys = (["<", ">", "a"] if view == "monthly" else []) + [key for key, _ in other_views()]
+        return "Type " + ", ".join(keys) + " or q."
+
+    drawn = block()  # What is on screen right above the prompt, or None if it cannot be erased.
+    print(drawn)
+    if len(shown) >= len(months) and len(views) == 1:
+        return
+
+    def erase_drawn(status_shown: str) -> bool:
+        """Clear the table, a status line and the prompt line, if they can still be reached."""
+        columns, rows = terminal_size()
+        if not in_place or drawn is None:
+            return False
+        # Rows between the top of the table and the cursor: the table, a status line, the prompt line.
+        used = screen_rows(drawn, columns) + (1 if status_shown else 0) + 1
+        if used >= rows:
+            return False
+        # Go up to the first drawn row and clear from there to the end of the screen.
+        print(f"\x1b[{used}F\x1b[J", end="")
+        return True
+
+    status = ""
+    while True:
+        try:
+            answer = ask(prompt()).strip().lower()
+        except EOFError:
+            return
+        if answer in ("", "q"):
+            # Leave only the table behind, without the prompt or a leftover message.
+            if erase_drawn(status):
+                print(drawn)
+            return
+
+        previous_status, status = status, ""
+        if answer in views and views[answer][0] != view:
+            view = views[answer][0]
+        elif view != "monthly":
+            status = valid_keys()
+        elif answer == "<":
+            if low == 0:
+                status = "No earlier months."
+            else:
+                low = max(0, low - size)
+                high = min(len(months), low + size)
+        elif answer == ">":
+            if high >= len(months):
+                status = "No later months."
+            else:
+                high = min(len(months), high + size)
+                low = max(0, high - size)
+        elif answer == "a":
+            low, high = 0, len(months)
+        else:
+            status = valid_keys()
+
+        if erase_drawn(previous_status):
+            drawn = block()
+            print(drawn)
+            if status:
+                print(status)
+        elif in_place and not status:
+            # Too tall to erase: start a fresh copy below, which the next key can replace if it fits.
+            drawn = block()
+            print()
+            print(drawn)
+        else:
+            drawn = None
+            print(status if status else "\n" + block())

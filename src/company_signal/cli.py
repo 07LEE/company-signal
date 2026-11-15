@@ -4,11 +4,27 @@ from __future__ import annotations
 
 import argparse
 import sys
+from contextlib import closing
+from datetime import date
 
 from .api import Client, FetchError
 from .collect import collect
 from .config import load_settings
-from .lookup import WarehouseMissing, choose, format_detail, format_hits, load_detail, open_warehouse, search
+from .lookup import (
+    DEFAULT_MONTHS,
+    WarehouseMissing,
+    browse,
+    choose,
+    format_hits,
+    format_notes,
+    format_summary,
+    load_detail,
+    load_overall,
+    load_years,
+    open_warehouse,
+    pick_months,
+    search,
+)
 from .store import Store
 
 
@@ -46,13 +62,29 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_search(args: argparse.Namespace) -> int:
-    settings = load_settings(require_key=False)
+def month_count(text: str) -> int | None:
+    """--months value: a positive number, or "all" (returned as None)."""
+    if text == "all":
+        return None
+    if not text.isdecimal() or int(text) < 1:
+        raise argparse.ArgumentTypeError('give a number of months, or "all"')
+    return int(text)
+
+
+def month(text: str) -> date:
+    """--from / --to value: a month written as YYYY-MM."""
     try:
-        con = open_warehouse(settings.warehouse_path)
-    except WarehouseMissing as exc:
-        print(exc, file=sys.stderr)
-        return 1
+        year, month_number = text.split("-")
+        return date(int(year), int(month_number), 1)
+    except ValueError:
+        raise argparse.ArgumentTypeError("give a month as YYYY-MM, for example 2025-03") from None
+
+
+def cmd_search(args: argparse.Namespace) -> int:
+    if args.start and args.end and args.start > args.end:
+        print("--from must not be later than --to.", file=sys.stderr)
+        return 2
+    warehouse = load_settings(require_key=False).warehouse_path
     try:
         name = args.name
         if name is None:
@@ -62,7 +94,12 @@ def cmd_search(args: argparse.Namespace) -> int:
             name = input("Workplace name: ").strip()
             if not name:
                 return 0
-        hits, total = search(con, name, args.limit)
+
+        # The warehouse is open only while reading, never while waiting for a
+        # key. A lookup left sitting at a prompt would otherwise keep the file
+        # open and block the next dbt build from writing to it.
+        with closing(open_warehouse(warehouse)) as con:
+            hits, total = search(con, name, args.limit)
         print(format_hits(hits, total, name))
         # Piped output gets the list only; a person at a terminal gets to pick one.
         if not sys.stdin.isatty():
@@ -70,13 +107,27 @@ def cmd_search(args: argparse.Namespace) -> int:
         selected = choose(hits)
         if selected is None:
             return 0
+
+        with closing(open_warehouse(warehouse)) as con:
+            workplace, months = load_detail(con, selected.workplace_id)
+            years = load_years(con, selected.workplace_id)
+            overall = load_overall(con, selected.workplace_id)
+        shown = pick_months(months, last=args.months, start=args.start, end=args.end)
         print()
-        print(format_detail(*load_detail(con, selected.workplace_id)))
+        print(format_summary(workplace, months))
+        print()
+        browse(months, shown, years, overall)
+        print()
+        print(format_notes(workplace, months))
+    except WarehouseMissing as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    except LookupError:
+        print("That workplace is no longer in the warehouse; it was rebuilt meanwhile. Search again.", file=sys.stderr)
+        return 1
     except (EOFError, KeyboardInterrupt):
         print()
         return 130
-    finally:
-        con.close()
     return 0
 
 
@@ -96,6 +147,15 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("search", help="find workplaces by name and open one")
     p.add_argument("name", nargs="?", help="workplace name, or part of it; asked for when omitted")
     p.add_argument("--limit", type=int, default=20, help="max workplaces to list (default 20)")
+    p.add_argument(
+        "--months",
+        type=month_count,
+        default=DEFAULT_MONTHS,
+        metavar="N|all",
+        help=f"months of history to show, counted back from the latest (default {DEFAULT_MONTHS})",
+    )
+    p.add_argument("--from", dest="start", type=month, metavar="YYYY-MM", help="first month to show")
+    p.add_argument("--to", dest="end", type=month, metavar="YYYY-MM", help="last month to show")
     p.set_defaults(func=cmd_search)
 
     args = parser.parse_args(argv)
