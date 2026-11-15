@@ -13,6 +13,7 @@ from pathlib import Path
 import duckdb
 
 from .fsc import ROWS_PER_PAGE, DailyLimitReached, FscClient
+from .sqlfunctions import register_functions
 from .store import Store
 
 # A common name can match thousands of corporations. Past this many pages the
@@ -34,9 +35,10 @@ def candidate_names(warehouse_path: Path) -> list[str]:
     """Search names for the API, the largest workplace's name first."""
     con = duckdb.connect(str(warehouse_path), read_only=True)
     try:
+        register_functions(con, temporary=True)
         return [row[0] for row in con.execute(CANDIDATES_SQL).fetchall()]
     except duckdb.CatalogException as exc:
-        raise SystemExit("The lookup tables are out of date. Rebuild them: dbt build --project-dir transform --profiles-dir transform") from exc
+        raise SystemExit("The lookup tables are missing or out of date. Rebuild them: dbt build --project-dir transform --profiles-dir transform") from exc
     finally:
         con.close()
 

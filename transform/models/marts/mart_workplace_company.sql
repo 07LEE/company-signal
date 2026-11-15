@@ -1,5 +1,5 @@
 -- Workplaces tied to the corporation that disclosed figures about itself. The
--- tying rule is in fsc_ties (macros/create_functions.sql), which the lookup also
+-- tying rule is in fsc_ties (src/company_signal/sql/functions.sql), which the lookup also
 -- uses: a workplace is tied only when exactly one corporation found by its name
 -- has a registration number starting with the workplace's 6 digits.
 

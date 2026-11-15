@@ -9,10 +9,6 @@ macro-paths: [macros]
 target-path: target
 clean-targets: [target]
 
-# SQL functions shared by the models and the lookup CLI.
-on-run-start:
-  - "{{ create_functions() }}"
-
 models:
   company_signal:
     +materialized: table

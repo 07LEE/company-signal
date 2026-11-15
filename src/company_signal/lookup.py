@@ -16,6 +16,8 @@ from pathlib import Path
 
 import duckdb
 
+from .sqlfunctions import register_functions
+
 WORKPLACE_TYPES = {"1": "corporation", "2": "individual"}
 
 # Below this many subscribers in the previous month, one or two people move a
@@ -47,7 +49,11 @@ def open_warehouse(path: Path) -> duckdb.DuckDBPyConnection:
         raise WarehouseMissing(
             f"{path} does not exist. Build it first: dbt build --project-dir transform --profiles-dir transform"
         )
-    return duckdb.connect(str(path), read_only=True)
+    con = duckdb.connect(str(path), read_only=True)
+    # The functions come from the package, not from the file, so a warehouse
+    # built by an older version still reads with today's rules.
+    register_functions(con, temporary=True)
+    return con
 
 
 # Workplaces still present in the latest month come first, then an exact name

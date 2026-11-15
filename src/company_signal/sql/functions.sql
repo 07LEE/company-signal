@@ -1,21 +1,27 @@
-{# normalize_name: search and matching key for a workplace name.
+-- SQL functions shared by the dbt models, the collector and the lookup.
+--
+-- This file is the only definition. dbt registers it through the plugin in
+-- company_signal/dbt_plugin.py, and the lookup and the tests through
+-- company_signal.sqlfunctions.register_functions, so the rules are the same
+-- whether a warehouse has been built or not.
 
-   1. Full-width characters become their ASCII form, so "（주）" equals "(주)".
-      About 7% of names are written with full-width brackets.
-   2. Letters are upper-cased.
-   3. Legal-form markers and whitespace are dropped, so "(주)한빛",
-      "주식회사 한빛" and "한빛" compare equal.
-
-   Bracketed text is otherwise kept. A bracketed English name looks like noise,
-   but brackets also tell units apart, as in "(1BL)" and "(2BL)" or "(1)" and
-   "(3)"; dropping them merged 166 different workplaces in a 13-month test.
-
-   The lookup CLI calls the same function on the search text.
-
-   The other functions read company disclosures. The collector, the dbt models
-   and the lookup all go through them, so a disclosure is read the same way
-   whichever way it came in. #}
-{% macro create_functions() %}
+-- normalize_name: search and matching key for a workplace name.
+--
+-- 1. Full-width characters become their ASCII form, so "（주）" equals "(주)".
+-- About 7% of names are written with full-width brackets.
+-- 2. Letters are upper-cased.
+-- 3. Legal-form markers and whitespace are dropped, so "(주)한빛",
+-- "주식회사 한빛" and "한빛" compare equal.
+--
+-- Bracketed text is otherwise kept. A bracketed English name looks like noise,
+-- but brackets also tell units apart, as in "(1BL)" and "(2BL)" or "(1)" and
+-- "(3)"; dropping them merged 166 different workplaces in a 13-month test.
+--
+-- The lookup CLI calls the same function on the search text.
+--
+-- The other functions read company disclosures. The collector, the dbt models
+-- and the lookup all go through them, so a disclosure is read the same way
+-- whichever way it came in.
 create or replace macro normalize_name(name) as
     regexp_replace(
         upper(replace(
@@ -32,15 +38,15 @@ create or replace macro normalize_name(name) as
     )
 ;
 
-{# fsc_query_name: the text to search the corporate outline API with.
-   The API matches on the plain company name, and a bracketed addition such as
-   an English name makes it find nothing. A wrong match is ruled out later by
-   the business registration number. #}
+-- fsc_query_name: the text to search the corporate outline API with.
+-- The API matches on the plain company name, and a bracketed addition such as
+-- an English name makes it find nothing. A wrong match is ruled out later by
+-- the business registration number.
 create or replace macro fsc_query_name(name_norm) as
     rtrim(regexp_replace(name_norm, '\(.*', ''), '-');
 
-{# fsc_outline_items: the corporations in one API response, as a list of structs.
-   Only the fields the project uses are read. An empty answer gives an empty list. #}
+-- fsc_outline_items: the corporations in one API response, as a list of structs.
+-- Only the fields the project uses are read. An empty answer gives an empty list.
 create or replace macro fsc_outline_items(body) as
     from_json(
         case json_type(json_extract(body, '$.response.body.items.item'))
@@ -53,14 +59,14 @@ create or replace macro fsc_outline_items(body) as
            "enpMainBizNm": "VARCHAR", "sicNm": "VARCHAR", "fstOpegDt": "VARCHAR", "lastOpegDt": "VARCHAR"}]'
     );
 
-{# fsc_amount: a disclosed count or amount. The API sends text, and 0 or an
-   empty string where the company disclosed nothing. #}
+-- fsc_amount: a disclosed count or amount. The API sends text, and 0 or an
+-- empty string where the company disclosed nothing.
 create or replace macro fsc_amount(text) as
     nullif(try_cast(nullif(trim(text), '') as bigint), 0);
 
-{# parse_tenure_years: the average tenure as companies write it, in years.
-   Seen so far: "15.0", "9.32", "16년 11월", "약9년9개월", "80개월". Anything
-   else, zero, or more than 60 years gives NULL. #}
+-- parse_tenure_years: the average tenure as companies write it, in years.
+-- Seen so far: "15.0", "9.32", "16년 11월", "약9년9개월", "80개월". Anything
+-- else, zero, or more than 60 years gives NULL.
 create or replace macro tenure_text_years(text) as
     case
         when regexp_full_match(regexp_replace(coalesce(text, ''), '약|\s', '', 'g'), '\d+(\.\d+)?')
@@ -73,12 +79,12 @@ create or replace macro tenure_text_years(text) as
 create or replace macro parse_tenure_years(text) as
     case when tenure_text_years(text) > 0 and tenure_text_years(text) <= 60 then tenure_text_years(text) end;
 
-{# fsc_can_ask: whether a workplace can be asked about by name.
-   Head offices of for-profit corporations only, by the two middle digits of
-   the business registration number: a branch (85) has its own number and
-   cannot be tied to its company by number, and individual businesses are not
-   in the API. Construction sites and day-labour units are registered under the
-   contractor's name plus a description; they are not companies. #}
+-- fsc_can_ask: whether a workplace can be asked about by name.
+-- Head offices of for-profit corporations only, by the two middle digits of
+-- the business registration number: a branch (85) has its own number and
+-- cannot be tied to its company by number, and individual businesses are not
+-- in the API. Construction sites and day-labour units are registered under the
+-- contractor's name plus a description; they are not companies.
 create or replace macro fsc_can_ask(workplace_type_code, biz_reg_no6, workplace_name, name_norm) as
     workplace_type_code = '1'
     and substr(biz_reg_no6, 4, 2) in ('81', '86', '87', '88')
@@ -87,13 +93,13 @@ create or replace macro fsc_can_ask(workplace_type_code, biz_reg_no6, workplace_
     and not contains(workplace_name, '상용')
     and length(fsc_query_name(name_norm)) >= 2;
 
-{# The three table functions below hold the rules for reading answers, choosing
-   a corporation's figures and tying workplaces to corporations. Each takes the
-   names of the tables to read, so the dbt models run them over everything
-   collected and the lookup runs them over the answer for one workplace. #}
+-- The three table functions below hold the rules for reading answers, choosing
+-- a corporation's figures and tying workplaces to corporations. Each takes the
+-- names of the tables to read, so the dbt models run them over everything
+-- collected and the lookup runs them over the answer for one workplace.
 
-{# fsc_outline_rows: one row per corporation in each stored answer.
-   page_table has query_name, page and body. #}
+-- fsc_outline_rows: one row per corporation in each stored answer.
+-- page_table has query_name, page and body.
 create or replace macro fsc_outline_rows(page_table) as table
     select
         p.query_name,
@@ -113,17 +119,17 @@ create or replace macro fsc_outline_rows(page_table) as table
         unnest(fsc_outline_items(p.body)) as t (item)
     where item.crno is not null and item.crno <> '';
 
-{# fsc_corporations: one row per corporation, from the rows of fsc_outline_rows.
-   The figures (employees, tenure, pay) come together from the latest snapshot
-   that has any of them, so they describe the same report. Later snapshots often
-   carry the name only, with the figures left at 0. Descriptive fields take the
-   latest value that is filled in; the latest snapshot can even have an empty
-   registration number.
-
-   Snapshots are ordered by the date they were last published, then by the
-   date they were first published, so a report published later wins over one
-   published earlier on the same day. The last keys only make the choice the
-   same on every run. #}
+-- fsc_corporations: one row per corporation, from the rows of fsc_outline_rows.
+-- The figures (employees, tenure, pay) come together from the latest snapshot
+-- that has any of them, so they describe the same report. Later snapshots often
+-- carry the name only, with the figures left at 0. Descriptive fields take the
+-- latest value that is filled in; the latest snapshot can even have an empty
+-- registration number.
+--
+-- Snapshots are ordered by the date they were last published, then by the
+-- date they were first published, so a report published later wins over one
+-- published earlier on the same day. The last keys only make the choice the
+-- same on every run.
 create or replace macro fsc_corporations(item_table) as table
     with item as (
         from query_table(item_table)
@@ -159,11 +165,11 @@ create or replace macro fsc_corporations(item_table) as table
     left join figures as f using (crno)
     group by i.crno;
 
-{# fsc_ties: workplaces tied to a corporation, as (workplace_id, crno).
-   workplace_table has workplace_id, biz_reg_no6 and name_norm. Among the
-   corporations found by the workplace's name, those whose registration number
-   starts with its published 6 digits are candidates. Only a workplace with
-   exactly one candidate is tied: with two, either could be the wrong company. #}
+-- fsc_ties: workplaces tied to a corporation, as (workplace_id, crno).
+-- workplace_table has workplace_id, biz_reg_no6 and name_norm. Among the
+-- corporations found by the workplace's name, those whose registration number
+-- starts with its published 6 digits are candidates. Only a workplace with
+-- exactly one candidate is tied: with two, either could be the wrong company.
 create or replace macro fsc_ties(workplace_table, item_table) as table
     with workplace as (
         select workplace_id, biz_reg_no6, fsc_query_name(name_norm) as query_name
@@ -179,5 +185,4 @@ create or replace macro fsc_ties(workplace_table, item_table) as table
     select workplace_id, any_value(crno) as crno
     from candidate
     group by workplace_id
-    having count(*) = 1
-{% endmacro %}
+    having count(*) = 1;

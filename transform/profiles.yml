@@ -7,6 +7,9 @@ company_signal:
       type: duckdb
       path: "{{ env_var('COMPANY_SIGNAL_DATA_DIR', 'data') }}/warehouse.duckdb"
       threads: 4
+      plugins:
+        # Registers the shared SQL functions (src/company_signal/sql/functions.sql).
+        - module: company_signal.dbt_plugin
       attach:
         # Written by the collector. Read-only here.
         - path: "{{ env_var('COMPANY_SIGNAL_DATA_DIR', 'data') }}/company_signal.duckdb"
