@@ -134,3 +134,28 @@ def test_enrich_keeps_what_it_has_when_the_daily_limit_is_reached(tmp_path, ware
     assert result.limit_reached and result.names_asked == 1
     assert store.fsc_counts() == (1, 1, 0)
     assert any("daily limit" in line for line in logs)
+
+
+def test_old_answers_are_asked_again_after_every_name_was_asked_once(tmp_path, warehouse):
+    asked = []
+
+    def handler(request):
+        asked.append(request.url.params["corpNm"])
+        return httpx.Response(200, text=outline(1))
+
+    store = Store(tmp_path / "collected.duckdb")
+    store.init()
+    store.record_fsc_response("가람", [outline(1)], 1, False)
+    store.record_fsc_response("옛날회사", [outline(1)], 1, False)  # its workplace is gone from the data
+    with store.connect() as con:
+        con.execute("update meta.fsc_query set fetched_at = now() - interval 40 days")
+
+    result = enrich(make_client(handler), store, warehouse, max_calls=100, log=lambda _: None)
+    # The name never asked comes first; the old answer of a name still asked about is renewed.
+    assert asked == ["한빛소프트", "가람"]
+    assert (result.names_asked, result.names_refreshed) == (2, 1)
+
+    # Asking again restarts the 30 days from that day.
+    asked.clear()
+    assert enrich(make_client(handler), store, warehouse, max_calls=100, log=lambda _: None).names_asked == 0
+    assert asked == []

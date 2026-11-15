@@ -13,7 +13,7 @@ from .api import Client, FetchError
 from .collect import collect
 from .config import KEY_ENV, Settings, load_settings
 from .disclosure import company_from_answer, company_loader, query_name_if_askable
-from .enrich import enrich
+from .enrich import REFRESH_AFTER_DAYS, enrich
 from .live import fetch_history, search_live
 from .fsc import FscClient
 from .lookup import (
@@ -60,7 +60,7 @@ def cmd_enrich(args: argparse.Namespace) -> int:
         return 1
     client = FscClient(settings.service_key, interval=args.interval)
     try:
-        enrich(client, Store(settings.db_path), settings.warehouse_path, args.max_calls)
+        enrich(client, Store(settings.db_path), settings.warehouse_path, args.max_calls, refresh_after_days=args.refresh_after_days)
     except FetchError as exc:
         print(f"Stopped: {exc}", file=sys.stderr)
         print("Run the same command again to continue.", file=sys.stderr)
@@ -327,6 +327,12 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("enrich", help="collect company disclosures for the workplaces, largest first")
     p.add_argument("--max-calls", type=int, default=9000, help="API calls to spend in this run (default 9000; the key allows 10000 a day)")
     p.add_argument("--interval", type=float, default=0.1, help="seconds to wait between calls")
+    p.add_argument(
+        "--refresh-after-days",
+        type=positive_int,
+        default=REFRESH_AFTER_DAYS,
+        help=f"once every name is asked, ask again about answers older than this (default {REFRESH_AFTER_DAYS})",
+    )
     p.set_defaults(func=cmd_enrich)
 
     p = sub.add_parser("update", help="collect, build, add company disclosures and build again, skipping what has nothing new")

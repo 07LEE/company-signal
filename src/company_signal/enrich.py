@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import duckdb
@@ -16,6 +17,11 @@ import duckdb
 from .fsc import ROWS_PER_PAGE, DailyLimitReached, FscClient
 from .sqlfunctions import register_functions
 from .store import Store
+
+# An answer older than this many days is asked again once every name has been
+# asked once. A company files new figures about once a year; the answer itself
+# carries no date that says when its content last changed.
+REFRESH_AFTER_DAYS = 30
 
 # A common name can match thousands of corporations. Past this many pages the
 # query is recorded as truncated instead of spending the day's quota on it.
@@ -66,14 +72,32 @@ class EnrichResult:
     calls: int
     names_left: int
     limit_reached: bool  # the key's daily limit, not --max-calls
+    names_refreshed: int = 0  # of names_asked, those asked again because their answer was old
 
 
-def enrich(client: FscClient, store: Store, warehouse_path: Path, max_calls: int, log=print) -> EnrichResult:
+def enrich(
+    client: FscClient,
+    store: Store,
+    warehouse_path: Path,
+    max_calls: int,
+    log=print,
+    refresh_after_days: int = REFRESH_AFTER_DAYS,
+    now: datetime | None = None,
+) -> EnrichResult:
+    """Ask about names never asked first, then, with the calls left, names whose answer is old, oldest first."""
     store.init()
     names = candidate_names(warehouse_path)
     done = store.fsc_queried_names()
-    todo = [name for name in names if name not in done]
-    log(f"{len(names):,} company names to ask about, {len(names) - len(todo):,} already asked, {len(todo):,} left")
+    unasked = [name for name in names if name not in done]
+    # Only names that are still asked about: a workplace gone from the data is not asked again.
+    current = set(names)
+    cutoff = (now or datetime.now().astimezone()) - timedelta(days=refresh_after_days)
+    stale = [name for name in store.fsc_names_asked_before(cutoff) if name in current]
+    todo = unasked + stale
+    log(
+        f"{len(names):,} company names to ask about: {len(unasked):,} never asked,"
+        f" {len(stale):,} with an answer older than {refresh_after_days} days"
+    )
 
     calls = asked = 0
     limit_reached = False
@@ -94,5 +118,11 @@ def enrich(client: FscClient, store: Store, warehouse_path: Path, max_calls: int
         asked += 1
         if asked % 500 == 0:
             log(f"  {asked:,} names, {calls:,} calls")
-    log(f"Asked about {asked:,} names with {calls:,} calls. {len(todo) - asked:,} names left; run again to continue.")
-    return EnrichResult(names_asked=asked, calls=calls, names_left=len(todo) - asked, limit_reached=limit_reached)
+    refreshed = max(0, asked - len(unasked))
+    log(
+        f"Asked about {asked:,} names with {calls:,} calls ({refreshed:,} asked again)."
+        f" {len(todo) - asked:,} names left; run again to continue."
+    )
+    return EnrichResult(
+        names_asked=asked, calls=calls, names_left=len(todo) - asked, limit_reached=limit_reached, names_refreshed=refreshed
+    )

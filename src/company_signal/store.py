@@ -258,6 +258,14 @@ class Store:
         with self.connect() as con:
             return {row[0] for row in con.execute("SELECT query_name FROM meta.fsc_query").fetchall()}
 
+    def fsc_names_asked_before(self, moment: datetime) -> list[str]:
+        """Names whose stored answer is older than `moment`, oldest first."""
+        with self.connect() as con:
+            rows = con.execute(
+                "SELECT query_name FROM meta.fsc_query WHERE fetched_at < ? ORDER BY fetched_at, query_name", [moment]
+            ).fetchall()
+        return [row[0] for row in rows]
+
     def record_fsc_response(self, query_name: str, pages: list[str], total_count: int, truncated: bool) -> None:
         """Store every page of one name's answer, replacing an earlier answer to the same name."""
         with self.connect() as con:
@@ -268,10 +276,13 @@ class Store:
                     "INSERT INTO raw.fsc_corp_outline_page (query_name, page, body) VALUES (?, ?, ?)",
                     [(query_name, number, body) for number, body in enumerate(pages, 1)],
                 )
+                # fetched_at is set here: INSERT OR REPLACE keeps the old value of a
+                # column it is not given, so the default would date a renewed answer
+                # by its first fetch.
                 con.execute(
                     """
-                    INSERT OR REPLACE INTO meta.fsc_query (query_name, total_count, pages_fetched, truncated)
-                    VALUES (?, ?, ?, ?)
+                    INSERT OR REPLACE INTO meta.fsc_query (query_name, total_count, pages_fetched, truncated, fetched_at)
+                    VALUES (?, ?, ?, ?, now())
                     """,
                     [query_name, total_count, len(pages), truncated],
                 )

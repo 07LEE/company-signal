@@ -111,8 +111,9 @@ def update(steps: Steps, force_build: bool = False, log=print) -> list[str]:
 
     enriched, took = timed("enrich", steps.enrich)
     limit = ", daily limit reached" if enriched.limit_reached else ""
+    again = f" ({enriched.names_refreshed:,} asked again)" if enriched.names_refreshed else ""
     summary.append(
-        f"enrich: {enriched.names_asked:,} names, {enriched.calls:,} calls, {enriched.names_left:,} left{limit}, {took}"
+        f"enrich: {enriched.names_asked:,} names{again}, {enriched.calls:,} calls, {enriched.names_left:,} left{limit}, {took}"
     )
 
     if enriched.names_asked:
