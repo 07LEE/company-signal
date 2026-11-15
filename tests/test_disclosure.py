@@ -92,6 +92,22 @@ def test_a_collected_answer_is_used_without_asking(tmp_path, warehouse, monkeypa
     assert company["crno"] == "c1"
 
 
+
+def test_refresh_asks_again_and_replaces_the_stored_answer(tmp_path, warehouse, monkeypatch):
+    calls = []
+    newer = answer(corp("c1", "1238100001", employees="150"))
+    real_init = FscClient.__init__
+    monkeypatch.setattr(FscClient, "__init__", lambda self, key, **kw: real_init(self, key, interval=0, sleep=lambda _: None, transport=fsc_transport(calls, newer)))
+    store = Store(tmp_path / "data" / "company_signal.duckdb")
+    store.init()
+    store.record_fsc_response("한빛", [answer(corp("c1", "1238100001"))], 1, False)
+
+    load = company_for_untied(Settings(root=tmp_path, service_key="k"), "w1", "한빛", refresh=True)
+    assert callable(load) and calls == []  # asked only when the company view opens
+    assert load()["employee_count"] == 150
+    assert calls == ["한빛"]
+    assert store.fsc_pages("한빛") == [newer]
+
 def test_an_unasked_workplace_gets_a_loader_only_with_a_key(tmp_path, warehouse):
     assert company_for_untied(Settings(root=tmp_path, service_key=""), "w1", "한빛") is None
     assert callable(company_for_untied(Settings(root=tmp_path, service_key="k"), "w1", "한빛"))

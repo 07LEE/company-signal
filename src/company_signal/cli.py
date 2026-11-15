@@ -167,19 +167,20 @@ def month(text: str) -> date:
         raise argparse.ArgumentTypeError("give a month as YYYY-MM, for example 2025-03") from None
 
 
-def company_for_untied(settings: Settings, workplace_id: str, query_name: str, connect=None):
+def company_for_untied(settings: Settings, workplace_id: str, query_name: str, connect=None, refresh: bool = False):
     """For a workplace the warehouse has not tied: the company, a loader, or None.
 
     An answer already collected for its name is used straight away; it may be
-    newer than the last dbt build. Without one, the workplace gets a loader that
-    asks the API when the user opens the company view, if there is a key to ask with.
+    newer than the last dbt build. Without one, or with `refresh`, the workplace
+    gets a loader that asks the API when the user opens the company view, if
+    there is a key to ask with; the new answer replaces the stored one.
     `connect` gives the connection that holds the workplace; by default the warehouse.
     """
     if connect is None:
         def connect():
             return closing(open_warehouse(settings.warehouse_path))
     store = Store(settings.db_path)
-    pages = store.fsc_pages(query_name) if settings.db_path.exists() else None
+    pages = store.fsc_pages(query_name) if settings.db_path.exists() and not refresh else None
     if pages is not None:
         with connect() as con:
             return company_from_answer(con, workplace_id, query_name, pages)
@@ -213,6 +214,9 @@ def cmd_search(args: argparse.Namespace) -> int:
         print("--from must not be later than --to.", file=sys.stderr)
         return 2
     settings = load_settings(require_key=False)
+    if args.refresh and not settings.service_key:
+        print(f"--refresh asks the API, so it needs {KEY_ENV} in .env.", file=sys.stderr)
+        return 2
     warehouse = settings.warehouse_path
     if not warehouse.exists() and not settings.service_key:
         print(
@@ -270,12 +274,13 @@ def cmd_search(args: argparse.Namespace) -> int:
             workplace, months = load_detail(con, selected.workplace_id)
             years = load_years(con, selected.workplace_id)
             overall = load_overall(con, selected.workplace_id)
-            company = load_company(con, selected.workplace_id)
+            # With --refresh the tie made by the last build is set aside and the company asked again.
+            company = None if args.refresh else load_company(con, selected.workplace_id)
             query_name = None if company else query_name_if_askable(con, selected.workplace_id)
         if query_name:
             # A live lookup's workplace is in its in-memory database, not in the warehouse.
             connect = (lambda: nullcontext(live.con)) if live else None
-            company = company_for_untied(settings, selected.workplace_id, query_name, connect)
+            company = company_for_untied(settings, selected.workplace_id, query_name, connect, refresh=args.refresh)
         shown = pick_months(months, last=args.months, start=args.start, end=args.end)
         print()
         print(format_summary(workplace, months))
@@ -346,6 +351,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--from", dest="start", type=month, metavar="YYYY-MM", help="first month to show")
     p.add_argument("--to", dest="end", type=month, metavar="YYYY-MM", help="last month to show")
+    p.add_argument("--refresh", action="store_true", help="ask the API for the company details again instead of using the stored answer")
     p.set_defaults(func=cmd_search)
 
     args = parser.parse_args(argv)
