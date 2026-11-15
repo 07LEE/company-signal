@@ -63,3 +63,7 @@ Monthly history (2026-08 to 2026-09, 2 of 32 months)
 - Rates are hidden below 5 staff.
 - A workplace that changes its name appears as a new one, unless only an English name or a legal-form word was added or dropped.
 - Company details are reported by the company itself, for the whole company.
+
+## License
+
+The code is under the [MIT License](LICENSE). The data comes from the National Pension Service and the Financial Services Commission through data.go.kr and is not part of this repository.
