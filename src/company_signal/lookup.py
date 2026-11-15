@@ -303,18 +303,22 @@ def format_overall(o: dict) -> str:
         # Nobody can have stayed longer than the workplace has been in the scheme.
         return f"over {age:.1f} years" if age is not None and value > age else f"{value:.1f} years"
 
-    def spans(label: str, cells: list[str]) -> None:
+    rows = {
+        "attrition / year": [percent(o[f"attrition_rate_{key}"]) for _, key, _ in SPANS],
+        "replaced / year": [percent(o[f"replacement_rate_{key}"]) for _, key, _ in SPANS],
+        "implied tenure": [tenure(o[f"implied_tenure_years{suffix}"]) for _, _, suffix in SPANS],
+    }
+    lines.append("")
+    for label, cells in {"": [title for title, _, _ in SPANS], **rows}.items():
         lines.append(f"  {label:<18}" + "".join(f"{cell:>16}" for cell in cells))
 
     lines.append("")
-    spans("", [title for title, _, _ in SPANS])
-    spans("attrition / year", [percent(o[f"attrition_rate_{key}"]) for _, key, _ in SPANS])
-    spans("replaced / year", [percent(o[f"replacement_rate_{key}"]) for _, key, _ in SPANS])
-    spans("implied tenure", [tenure(o[f"implied_tenure_years{suffix}"]) for _, _, suffix in SPANS])
-
-    lines.append("")
-    reason = f"hidden below {MIN_HEADCOUNT_FOR_RATES} staff" if too_small else "needs more months"
-    lines.append(f'  "-" {reason}. Implied tenure = 1 / attrition, not a measured tenure.')
+    note = "Implied tenure = 1 / attrition, not a measured tenure."
+    # Explain "-" only when there is one on screen.
+    if any(cell == "-" for cells in rows.values() for cell in cells):
+        reason = f"hidden below {MIN_HEADCOUNT_FOR_RATES} staff" if too_small else "needs more months"
+        note = f'"-" {reason}. {note}'
+    lines.append(f"  {note}")
     return "\n".join(lines)
 
 
@@ -457,7 +461,7 @@ def browse(
     if company:
         views["d"] = ("company", "company")
 
-    def block() -> str:
+    def view_text() -> str:
         if view == "yearly":
             return format_yearly(years)
         if view == "summary":
@@ -465,6 +469,10 @@ def browse(
         if view == "company":
             return format_company(company)
         return format_history(months, months[low:high])
+
+    def block() -> str:
+        # A blank line keeps the view apart from the prompt below it.
+        return view_text() + "\n"
 
     def other_views() -> list[tuple[str, str]]:
         return [(key, label) for key, (name, label) in views.items() if name != view]
@@ -478,10 +486,11 @@ def browse(
         keys = (["<", ">", "a"] if view == "monthly" else []) + [key for key, _ in other_views()]
         return "Type " + ", ".join(keys) + " or q."
 
+    if len(shown) >= len(months) and len(views) == 1:
+        print(view_text())  # nothing else to show, so no prompt
+        return
     drawn = block()  # What is on screen right above the prompt, or None if it cannot be erased.
     print(drawn)
-    if len(shown) >= len(months) and len(views) == 1:
-        return
 
     def erase_drawn(status_shown: str) -> bool:
         """Clear the table, a status line and the prompt line, if they can still be reached."""
@@ -503,9 +512,9 @@ def browse(
         except EOFError:
             return
         if answer in ("", "q"):
-            # Leave only the table behind, without the prompt or a leftover message.
+            # Leave only the view behind, without the prompt, a leftover message or the blank line.
             if erase_drawn(status):
-                print(drawn)
+                print(view_text())
             return
 
         previous_status, status = status, ""

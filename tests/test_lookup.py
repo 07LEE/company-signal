@@ -297,8 +297,8 @@ def test_browse_in_place_erases_exactly_what_it_drew(capsys):
     months = year_of_months()
     browse(months, pick_months(months, last=3), ask=answers("<"), in_place=True, terminal_size=tall_terminal())
     out = capsys.readouterr().out
-    # Drawn: title, header and 3 months are 5 rows, plus the prompt line.
-    assert "\x1b[6F\x1b[J" in out
+    # Drawn: title, header and 3 months are 5 rows, a blank line, then the prompt line.
+    assert "\x1b[7F\x1b[J" in out
     assert out.count("Monthly history") == 2
 
 
@@ -307,7 +307,7 @@ def test_browse_in_place_counts_the_status_line_when_erasing(capsys):
     browse(months, pick_months(months, last=3), ask=answers(">", ">"), in_place=True, terminal_size=tall_terminal())
     out = capsys.readouterr().out
     assert out.count("No later months.") == 2
-    assert "\x1b[6F" in out and "\x1b[7F" in out  # the second erase also covers the first message
+    assert "\x1b[7F" in out and "\x1b[8F" in out  # the second erase also covers the first message
 
 
 def test_browse_in_place_leaves_only_the_table_when_quitting(capsys):
@@ -318,6 +318,7 @@ def test_browse_in_place_leaves_only_the_table_when_quitting(capsys):
     # What is drawn after the last erase is the table alone: no message, no prompt.
     final = out.rsplit("\x1b[J", 1)[1]
     assert final.startswith("Monthly history (2026-10 to 2026-12, 3 of 12 months)")
+    assert final.endswith("  2026-12          100       1      1     1.0%     1.0%     3,000,000\n")  # no trailing blank line
     assert "Type" not in final
 
 
@@ -448,7 +449,8 @@ def test_overall_shows_three_spans_side_by_side():
     assert cells(text, "replaced / year") == ["11.0%", "14.0%", "18.0%"]
     assert cells(text, "implied tenure") == ["8.0 years", "6.2 years", "5.0 years"]
     assert "3,000,000 to 3,300,000  (+1.9% a year)" in text
-    assert text.splitlines()[-1] == '  "-" needs more months. Implied tenure = 1 / attrition, not a measured tenure.'
+    # Every cell has a value, so "-" is not explained.
+    assert text.splitlines()[-1] == "  Implied tenure = 1 / attrition, not a measured tenure."
 
 
 def test_overall_leaves_a_span_empty_until_its_months_exist():
@@ -457,6 +459,7 @@ def test_overall_leaves_a_span_empty_until_its_months_exist():
     )
     assert cells(text, "attrition / year") == ["12.5%", "-", "20.0%"]
     assert cells(text, "implied tenure") == ["8.0 years", "-", "5.0 years"]
+    assert text.splitlines()[-1] == '  "-" needs more months. Implied tenure = 1 / attrition, not a measured tenure.'
 
 
 def test_overall_caps_tenure_at_the_age_of_the_workplace():
@@ -543,3 +546,11 @@ def test_browse_offers_company_details_only_when_tied():
     seen.clear()
     browse(months, pick_months(months, last=3), ask=lambda prompt: seen.append(prompt) or "q", in_place=False)
     assert "[d]" not in seen[0]
+
+
+def test_browse_puts_a_blank_line_between_the_view_and_the_prompt(capsys):
+    months = year_of_months()
+    browse(months, pick_months(months, last=3), ask=answers("x", "q"), in_place=False)
+    lines = capsys.readouterr().out.splitlines()
+    first_table_end = lines.index("  2026-12          100       1      1     1.0%     1.0%     3,000,000")
+    assert lines[first_table_end + 1] == ""
