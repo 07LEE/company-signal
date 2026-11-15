@@ -65,7 +65,7 @@ select
     subscriber_count, latest_base_ym, in_latest_data,
     count(*) over () as total_matches
 from mart.mart_workplace
-where contains(name_norm, $needle)
+where contains(name_norm, $needle){former}
 order by in_latest_data desc, (name_norm = $needle) desc, subscriber_count desc, workplace_name
 limit $limit
 """
@@ -77,7 +77,15 @@ def search(con: duckdb.DuckDBPyConnection, query: str, limit: int = 20) -> tuple
     if not needle:
         # A query such as "(주)" normalizes to nothing and would match every workplace.
         return [], 0
-    rows = con.execute(SEARCH_SQL, {"needle": needle, "limit": limit}).fetchall()
+    # A renamed workplace is found by its earlier names too. Warehouses built
+    # before renamed workplaces were joined have no such column.
+    columns = {row[0] for row in con.execute("select column_name from (describe mart.mart_workplace)").fetchall()}
+    former = (
+        "\n    or len(list_filter(former_names, lambda f: contains(normalize_name(f.name), $needle))) > 0"
+        if "former_names" in columns
+        else ""
+    )
+    rows = con.execute(SEARCH_SQL.format(former=former), {"needle": needle, "limit": limit}).fetchall()
     hits = [WorkplaceHit(*row[:8]) for row in rows]
     return hits, (rows[0][8] if rows else 0)
 
