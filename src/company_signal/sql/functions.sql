@@ -178,24 +178,33 @@ create or replace macro fsc_corporations(item_table) as table
     left join figures as f using (crno)
     group by i.crno;
 
--- fsc_ties: workplaces tied to a corporation, as (workplace_id, crno).
+-- fsc_ties: workplaces tied to a corporation, as (workplace_id, crno, bzno).
 -- workplace_table has workplace_id, biz_reg_no6 and name_norm. Among the
 -- corporations found by the workplace's name, those whose registration number
 -- starts with its published 6 digits are candidates. Only a workplace with
 -- exactly one candidate is tied: with two, either could be the wrong company.
+--
+-- bzno is the number the workplace was tied by, from the latest snapshot that
+-- has it. A corporation can list a branch's own number in an older snapshot,
+-- so its latest number may not start with the branch's 6 digits; the details
+-- show the number that tied them, as the screen says they were tied by it.
 create or replace macro fsc_ties(workplace_table, item_table) as table
     with workplace as (
         select workplace_id, biz_reg_no6, fsc_query_name(name_norm) as query_name
         from query_table(workplace_table)
     ),
     candidate as (
-        select distinct w.workplace_id, i.crno
+        select
+            w.workplace_id,
+            i.crno,
+            arg_max(i.bzno, struct_pack(p := i.published_on, f := i.first_published_on, b := i.bzno)) as bzno
         from workplace as w
         inner join query_table(item_table) as i
             on i.query_name = w.query_name
             and left(i.bzno, 6) = w.biz_reg_no6
+        group by w.workplace_id, i.crno
     )
-    select workplace_id, any_value(crno) as crno
+    select workplace_id, any_value(crno) as crno, any_value(bzno) as bzno
     from candidate
     group by workplace_id
     having count(*) = 1;

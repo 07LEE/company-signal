@@ -3,6 +3,6 @@
 -- uses: a workplace is tied only when exactly one corporation found by its name
 -- has a registration number starting with the workplace's 6 digits.
 
-select t.workplace_id, c.*
+select t.workplace_id, c.* replace (t.bzno as bzno)
 from fsc_ties('{{ ref("mart_workplace") }}', '{{ ref("stg_fsc__corp_outline") }}') as t
 inner join {{ ref('int_fsc__corporation') }} as c using (crno)
