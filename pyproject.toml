@@ -1,6 +1,6 @@
 [project]
 name = "company-signal"
-version = "0.3.0"
+version = "0.4.0"
 description = "Monthly workforce indicators for Korean workplaces from National Pension Service and FSC public data"
 keywords = ["korea", "public-data", "national-pension-service", "workforce", "dbt", "duckdb"]
 requires-python = ">=3.11"
