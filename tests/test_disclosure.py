@@ -66,6 +66,18 @@ def test_company_from_answer_ties_only_one_matching_corporation(warehouse):
     con.close()
 
 
+
+def test_a_workplace_tied_by_an_older_number_shows_that_number(warehouse):
+    """A corporation can list a branch's own number in an older snapshot. The
+    branch is tied by it, and the details show it, not the head office's latest
+    number, which does not start with the branch's 6 digits."""
+    con = duckdb.connect(str(warehouse), read_only=True)
+    register_functions(con, temporary=True)
+    page = answer(corp("c1", "1238500009", name="한빛부산지점", published="20251014"), corp("c1", "1238100001", name="한빛부산지점"))
+    company = company_from_answer(con, "w2", "한빛부산지점", [page])
+    assert company["crno"] == "c1" and company["bzno"] == "1238500009"
+    con.close()
+
 def test_the_lookup_and_dbt_read_an_answer_the_same_way(warehouse):
     """The lookup's result has exactly the columns of the mart the dbt build makes."""
     con = duckdb.connect(str(warehouse), read_only=True)
@@ -91,6 +103,22 @@ def test_a_collected_answer_is_used_without_asking(tmp_path, warehouse, monkeypa
     company = company_for_untied(Settings(root=tmp_path, service_key="k"), "w1", "한빛")
     assert company["crno"] == "c1"
 
+
+
+def test_refresh_asks_again_and_replaces_the_stored_answer(tmp_path, warehouse, monkeypatch):
+    calls = []
+    newer = answer(corp("c1", "1238100001", employees="150"))
+    real_init = FscClient.__init__
+    monkeypatch.setattr(FscClient, "__init__", lambda self, key, **kw: real_init(self, key, interval=0, sleep=lambda _: None, transport=fsc_transport(calls, newer)))
+    store = Store(tmp_path / "data" / "company_signal.duckdb")
+    store.init()
+    store.record_fsc_response("한빛", [answer(corp("c1", "1238100001"))], 1, False)
+
+    load = company_for_untied(Settings(root=tmp_path, service_key="k"), "w1", "한빛", refresh=True)
+    assert callable(load) and calls == []  # asked only when the company view opens
+    assert load()["employee_count"] == 150
+    assert calls == ["한빛"]
+    assert store.fsc_pages("한빛") == [newer]
 
 def test_an_unasked_workplace_gets_a_loader_only_with_a_key(tmp_path, warehouse):
     assert company_for_untied(Settings(root=tmp_path, service_key=""), "w1", "한빛") is None

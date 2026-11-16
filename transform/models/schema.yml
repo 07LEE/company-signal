@@ -9,6 +9,14 @@ models:
         data_tests: [not_null]
       - name: subscriber_count
         data_tests: [not_null]
+      - name: biz_reg_no6
+        data_tests: [not_null]
+      - name: billed_amount
+        data_tests: [not_null]
+      - name: new_subscriber_count
+        data_tests: [not_null]
+      - name: lost_subscriber_count
+        data_tests: [not_null]
       - name: join_status_code
         data_tests:
           - accepted_values:
@@ -21,6 +29,11 @@ models:
                 values: ["1", "2"]
 
   - name: int_nps__selected_publication
+    columns:
+      - name: base_ym
+        data_tests: [unique, not_null]
+
+  - name: mart_month_profile
     columns:
       - name: base_ym
         data_tests: [unique, not_null]

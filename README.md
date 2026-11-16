@@ -1,12 +1,15 @@
 # company-signal
 
-Look up a Korean workplace by name and see how its headcount, joiners, leavers and estimated pay have moved month by month.
+Monthly workforce indicators for Korean workplaces, built from Korean public data.
 
-The numbers come from the National Pension Service workplace data on the Korean public data portal. The tool shows indicators and their limits. It does not rate or rank workplaces.
+Look up a workplace by name and see how its headcount, joiners, leavers and estimated pay have moved month by month. The numbers come from the National Pension Service (국민연금공단) workplace data and the Financial Services Commission (금융위원회) company outlines on Korea's public data portal, data.go.kr. The tool shows indicators and their limits. It does not rate or rank workplaces.
+
+## Requirements
+
+- Python 3.11 or later
+- A free [data.go.kr](https://www.data.go.kr) API key for datasets [15083277](https://www.data.go.kr/data/15083277/fileData.do) (pension) and [15043184](https://www.data.go.kr/data/15043184/openapi.do) (company details)
 
 ## Quick start
-
-You need Python 3.11 or later and a free API key from [data.go.kr](https://www.data.go.kr) for the pension dataset [15083277](https://www.data.go.kr/data/15083277/fileData.do). Apply for the corporate outline dataset [15043184](https://www.data.go.kr/data/15043184/openapi.do) with the same account to see company details.
 
 ```bash
 # 1. Install
@@ -19,19 +22,15 @@ echo "ODCLOUD_SERVICE_KEY_ENCODED=your-url-encoded-key" > .env
 company-signal search 한빛
 ```
 
-With nothing collected, the search asks the pension API directly: the latest month by name, then the earlier months of the workplace you pick. Answers are stored, so asking again costs no calls.
+With nothing collected, the search asks the API directly and stores the answers.
 
-To search the whole data locally instead, collect it and build the lookup tables:
+To collect the data and build the lookup tables locally, run this from the repository root. It resumes where it stopped and skips builds when nothing is new.
 
 ```bash
-company-signal collect      # the 13 newest monthly publications, about 11 minutes each
-company-signal enrich       # company details for the largest workplaces (optional)
-dbt build --project-dir transform --profiles-dir transform
+company-signal update       # --months 132 for the whole history since 2015
 ```
 
-The download can be interrupted. Run `company-signal collect` again and it resumes where it stopped. After new data has been downloaded, run the build again to include it.
-
-An opened workplace can be paged by month and switched to a yearly report, a summary of the whole period, or the company's own disclosure; the keys are shown on screen. Each command lists its options with `--help`.
+Each command lists its options with `--help`.
 
 ## Example
 
@@ -61,9 +60,13 @@ Monthly history (2026-08 to 2026-09, 2 of 32 months)
 ## Notes
 
 - The data is monthly and covers corporations with 3 or more subscribers and individual businesses with 10 or more.
-- "joined" and "left" include resumed and suspended pension payments, so they are close to, but not exactly, hires and resignations.
-- Estimated income is capped by the pension income ceiling. A high-income workplace comes out lower than it really is.
-- The implied tenure in the summary is 1 / attrition, an estimate and not a measured tenure.
-- Rates are hidden below 5 staff, and a rate over a span needs every month of that span.
-- The source has no workplace identifier, so a workplace that changes its name appears as a new one.
-- Company details are what the corporation reports about itself, for the whole company. They are shown only for a head office whose name and business number match one corporation.
+- "joined" and "left" include resumed and suspended payments, so they are not exactly hires and resignations.
+- Estimated income is capped by the pension income ceiling, so high incomes come out low.
+- Implied tenure is 1 / attrition, not a measured tenure.
+- Rates are hidden below 5 staff.
+- A workplace that changes its name appears as a new one, unless only an English name or a legal-form word was added or dropped.
+- Company details are reported by the company itself, for the whole company.
+
+## License
+
+The code is under the [MIT License](LICENSE). The data comes from the National Pension Service and the Financial Services Commission through data.go.kr and is not part of this repository.

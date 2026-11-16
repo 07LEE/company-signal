@@ -5,15 +5,16 @@ from __future__ import annotations
 import argparse
 import sys
 from contextlib import closing, nullcontext
-from datetime import date
+from datetime import date, datetime
 
 import duckdb
 
 from .api import Client, FetchError
 from .collect import collect
+from .compact import CompactRefused, compact
 from .config import KEY_ENV, Settings, load_settings
 from .disclosure import company_from_answer, company_loader, query_name_if_askable
-from .enrich import enrich
+from .enrich import REFRESH_AFTER_DAYS, enrich
 from .live import fetch_history, search_live
 from .fsc import FscClient
 from .lookup import (
@@ -32,6 +33,7 @@ from .lookup import (
     pick_months,
     search,
 )
+from .pipeline import StepFailed, Steps, run_dbt, update
 from .store import Store
 
 
@@ -39,7 +41,7 @@ def cmd_collect(args: argparse.Namespace) -> int:
     settings = load_settings()
     client = Client(settings.service_key, interval=args.interval)
     try:
-        collect(client, Store(settings.db_path), settings.raw_dir, args.months, args.max_pages)
+        collect(client, Store(settings.db_path), settings.raw_dir, args.months, args.max_pages, workers=args.workers)
     except FetchError as exc:
         print(f"Collection stopped: {exc}", file=sys.stderr)
         print("Run the same command again to resume where it stopped.", file=sys.stderr)
@@ -59,7 +61,7 @@ def cmd_enrich(args: argparse.Namespace) -> int:
         return 1
     client = FscClient(settings.service_key, interval=args.interval)
     try:
-        enrich(client, Store(settings.db_path), settings.warehouse_path, args.max_calls)
+        enrich(client, Store(settings.db_path), settings.warehouse_path, args.max_calls, refresh_after_days=args.refresh_after_days)
     except FetchError as exc:
         print(f"Stopped: {exc}", file=sys.stderr)
         print("Run the same command again to continue.", file=sys.stderr)
@@ -72,6 +74,36 @@ def cmd_enrich(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_update(args: argparse.Namespace) -> int:
+    settings = load_settings()
+    nps = Client(settings.service_key)
+    fsc = FscClient(settings.service_key)
+    store = Store(settings.db_path)
+    steps = Steps(
+        collect=lambda: collect(nps, store, settings.raw_dir, args.months, workers=args.workers),
+        enrich=lambda: enrich(fsc, store, settings.warehouse_path, args.max_calls),
+        build=lambda select: run_dbt(settings.root / "transform", settings.data_dir, select),
+        warehouse_exists=settings.warehouse_path.exists,
+    )
+    try:
+        summary = update(steps, force_build=args.force_build)
+    except StepFailed as exc:
+        print("\nUpdate stopped. Run the same command again to resume.", file=sys.stderr)
+        for line in exc.args[0]:
+            print(f"  {line}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("\nInterrupted. Run the same command again to resume.", file=sys.stderr)
+        return 130
+    finally:
+        nps.close()
+        fsc.close()
+    print("\nUpdate done.")
+    for line in summary:
+        print(f"  {line}")
+    return 0
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     settings = load_settings(require_key=False)
     if not settings.db_path.exists():
@@ -79,6 +111,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         return 0
     store = Store(settings.db_path)
     known, rows = store.counts()
+    print(build_note(settings, store))
     print(f"{known} publications known, {rows:,} raw records")
     print(f"{'published':<12}{'status':<13}{'fetched':>12}{'total':>12}{'pages':>11}  title")
     for title_date, status, total, fetched, pages, page_count, title in store.summary():
@@ -95,12 +128,55 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_compact(args: argparse.Namespace) -> int:
+    settings = load_settings(require_key=False)
+    if not settings.db_path.exists():
+        print("No data collected yet.")
+        return 0
+    try:
+        result = compact(settings.db_path)
+    except CompactRefused as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    except duckdb.IOException:
+        print("Another process is using the database. Run this when collection and builds have finished.", file=sys.stderr)
+        return 1
+    print(f"Checked {result.pages_checked:,} page files; all match what was recorded.")
+    for table, rows in result.tables_copied.items():
+        print(f"  {table}: {rows:,} rows")
+    print(f"{settings.db_path.name}: {result.size_before / 1e9:.1f} GB -> {result.size_after / 1e9:.2f} GB")
+    print(f"The old file is kept as {result.old_path.name}. Delete it once you are satisfied.")
+    return 0
+
+
+def build_note(settings: Settings, store: Store) -> str:
+    """When the lookup tables were built, and whether data has come in since."""
+    if not settings.warehouse_path.exists():
+        return "lookup tables: not built yet. Run company-signal update."
+    # Only dbt writes the warehouse; the lookup opens it read-only.
+    built_at = datetime.fromtimestamp(settings.warehouse_path.stat().st_mtime).astimezone()
+    publications, answers = store.added_since(built_at)
+    note = f"lookup tables: built {built_at:%Y-%m-%d %H:%M}"
+    if not publications and not answers:
+        return note + ", up to date"
+    return note + (
+        f"; since then {publications:,} publications completed and {answers:,} disclosure answers stored."
+        " Run company-signal update to include them."
+    )
+
+
 def month_count(text: str) -> int | None:
     """--months value: a positive number, or "all" (returned as None)."""
     if text == "all":
         return None
     if not text.isdecimal() or int(text) < 1:
         raise argparse.ArgumentTypeError('give a number of months, or "all"')
+    return int(text)
+
+
+def positive_int(text: str) -> int:
+    if not text.isdecimal() or int(text) < 1:
+        raise argparse.ArgumentTypeError("give a number of 1 or more")
     return int(text)
 
 
@@ -113,19 +189,20 @@ def month(text: str) -> date:
         raise argparse.ArgumentTypeError("give a month as YYYY-MM, for example 2025-03") from None
 
 
-def company_for_untied(settings: Settings, workplace_id: str, query_name: str, connect=None):
+def company_for_untied(settings: Settings, workplace_id: str, query_name: str, connect=None, refresh: bool = False):
     """For a workplace the warehouse has not tied: the company, a loader, or None.
 
     An answer already collected for its name is used straight away; it may be
-    newer than the last dbt build. Without one, the workplace gets a loader that
-    asks the API when the user opens the company view, if there is a key to ask with.
+    newer than the last dbt build. Without one, or with `refresh`, the workplace
+    gets a loader that asks the API when the user opens the company view, if
+    there is a key to ask with; the new answer replaces the stored one.
     `connect` gives the connection that holds the workplace; by default the warehouse.
     """
     if connect is None:
         def connect():
             return closing(open_warehouse(settings.warehouse_path))
     store = Store(settings.db_path)
-    pages = store.fsc_pages(query_name) if settings.db_path.exists() else None
+    pages = store.fsc_pages(query_name) if settings.db_path.exists() and not refresh else None
     if pages is not None:
         with connect() as con:
             return company_from_answer(con, workplace_id, query_name, pages)
@@ -159,6 +236,9 @@ def cmd_search(args: argparse.Namespace) -> int:
         print("--from must not be later than --to.", file=sys.stderr)
         return 2
     settings = load_settings(require_key=False)
+    if args.refresh and not settings.service_key:
+        print(f"--refresh asks the API, so it needs {KEY_ENV} in .env.", file=sys.stderr)
+        return 2
     warehouse = settings.warehouse_path
     if not warehouse.exists() and not settings.service_key:
         print(
@@ -216,12 +296,13 @@ def cmd_search(args: argparse.Namespace) -> int:
             workplace, months = load_detail(con, selected.workplace_id)
             years = load_years(con, selected.workplace_id)
             overall = load_overall(con, selected.workplace_id)
-            company = load_company(con, selected.workplace_id)
+            # With --refresh the tie made by the last build is set aside and the company asked again.
+            company = None if args.refresh else load_company(con, selected.workplace_id)
             query_name = None if company else query_name_if_askable(con, selected.workplace_id)
         if query_name:
             # A live lookup's workplace is in its in-memory database, not in the warehouse.
             connect = (lambda: nullcontext(live.con)) if live else None
-            company = company_for_untied(settings, selected.workplace_id, query_name, connect)
+            company = company_for_untied(settings, selected.workplace_id, query_name, connect, refresh=args.refresh)
         shown = pick_months(months, last=args.months, start=args.start, end=args.end)
         print()
         print(format_summary(workplace, months))
@@ -256,13 +337,35 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("collect", help="download publications, newest first, into the database")
     p.add_argument("--months", type=int, default=13, help="number of publications to download (default 13)")
     p.add_argument("--max-pages", type=int, default=None, help="max pages per publication (for testing)")
-    p.add_argument("--interval", type=float, default=0.2, help="seconds to wait between calls")
+    p.add_argument("--interval", type=float, default=0.2, help="seconds each request thread waits between calls")
+    p.add_argument(
+        "--workers",
+        type=positive_int,
+        default=8,
+        help="pages requested at once (default 8; more was no faster when tried)",
+    )
     p.set_defaults(func=cmd_collect)
 
     p = sub.add_parser("enrich", help="collect company disclosures for the workplaces, largest first")
     p.add_argument("--max-calls", type=int, default=9000, help="API calls to spend in this run (default 9000; the key allows 10000 a day)")
     p.add_argument("--interval", type=float, default=0.1, help="seconds to wait between calls")
+    p.add_argument(
+        "--refresh-after-days",
+        type=positive_int,
+        default=REFRESH_AFTER_DAYS,
+        help=f"once every name is asked, ask again about answers older than this (default {REFRESH_AFTER_DAYS})",
+    )
     p.set_defaults(func=cmd_enrich)
+
+    p = sub.add_parser("update", help="collect, build, add company disclosures and build again, skipping what has nothing new")
+    p.add_argument("--months", type=int, default=13, help="newest publications to keep collected (default 13)")
+    p.add_argument("--workers", type=positive_int, default=8, help="pages requested at once (default 8)")
+    p.add_argument("--max-calls", type=int, default=9000, help="disclosure API calls to spend (default 9000)")
+    p.add_argument("--force-build", action="store_true", help="build even when no new publication was completed")
+    p.set_defaults(func=cmd_update)
+
+    p = sub.add_parser("compact", help="shrink a database made before the page files became the only copy of the records")
+    p.set_defaults(func=cmd_compact)
 
     p = sub.add_parser("status", help="show collection progress")
     p.set_defaults(func=cmd_status)
@@ -279,6 +382,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--from", dest="start", type=month, metavar="YYYY-MM", help="first month to show")
     p.add_argument("--to", dest="end", type=month, metavar="YYYY-MM", help="last month to show")
+    p.add_argument("--refresh", action="store_true", help="ask the API for the company details again instead of using the stored answer")
     p.set_defaults(func=cmd_search)
 
     args = parser.parse_args(argv)

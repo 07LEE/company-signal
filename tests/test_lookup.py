@@ -62,6 +62,19 @@ def test_search_orders_current_then_exact_then_size(warehouse):
     assert hits[-1].in_latest_data is False
 
 
+
+def test_search_finds_a_renamed_workplace_by_its_earlier_name(warehouse):
+    # The fixture has no former_names column, like a warehouse built before workplaces were joined.
+    assert search(warehouse, "가람농업회사법인")[1] == 0
+    warehouse.execute("alter table mart.mart_workplace add column former_names struct(name varchar, last_base_ym date)[]")
+    warehouse.execute(
+        "update mart.mart_workplace set former_names = [{'name': '농업회사법인 가람', 'last_base_ym': date '2024-03-01'}]"
+        " where workplace_name = '다른회사'"
+    )
+    hits, total = search(warehouse, "가람")
+    assert (total, [h.name for h in hits]) == (1, ["다른회사"])
+    assert search(warehouse, "한빛")[1] == 3  # the other workplaces have no earlier names
+
 def test_search_limit_keeps_total(warehouse):
     hits, total = search(warehouse, "한빛", limit=1)
     assert (len(hits), total) == (1, 3)
@@ -172,6 +185,14 @@ def test_detail_shows_rates_and_says_why_yearly_attrition_is_missing():
     assert "needs 12 months of data" in text
     assert "Not in the latest data" not in text
 
+
+
+def test_summary_lists_the_names_a_renamed_workplace_had():
+    months = [month(date(2026, 8, 1), 100, 5, 3, None), month(date(2026, 9, 1), 104, 8, 4, 100)]
+    former = [{"name": "한빛", "last_base_ym": date(2024, 3, 1)}]
+    lines = format_summary(workplace(former_names=former), months).splitlines()
+    assert lines[:2] == ["(주)한빛", "  formerly   한빛 (to 2024-03)"]
+    assert "formerly" not in format_summary(workplace(former_names=None), months)
 
 def test_detail_of_small_workplace_shows_counts_without_rates():
     months = [month(date(2026, 8, 1), 4, 0, 1, None), month(date(2026, 9, 1), 3, 0, 1, 4)]

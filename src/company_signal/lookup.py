@@ -65,7 +65,7 @@ select
     subscriber_count, latest_base_ym, in_latest_data,
     count(*) over () as total_matches
 from mart.mart_workplace
-where contains(name_norm, $needle)
+where contains(name_norm, $needle){former}
 order by in_latest_data desc, (name_norm = $needle) desc, subscriber_count desc, workplace_name
 limit $limit
 """
@@ -77,7 +77,15 @@ def search(con: duckdb.DuckDBPyConnection, query: str, limit: int = 20) -> tuple
     if not needle:
         # A query such as "(주)" normalizes to nothing and would match every workplace.
         return [], 0
-    rows = con.execute(SEARCH_SQL, {"needle": needle, "limit": limit}).fetchall()
+    # A renamed workplace is found by its earlier names too. Warehouses built
+    # before renamed workplaces were joined have no such column.
+    columns = {row[0] for row in con.execute("select column_name from (describe mart.mart_workplace)").fetchall()}
+    former = (
+        "\n    or len(list_filter(former_names, lambda f: contains(normalize_name(f.name), $needle))) > 0"
+        if "former_names" in columns
+        else ""
+    )
+    rows = con.execute(SEARCH_SQL.format(former=former), {"needle": needle, "limit": limit}).fetchall()
     hits = [WorkplaceHit(*row[:8]) for row in rows]
     return hits, (rows[0][8] if rows else 0)
 
@@ -380,8 +388,11 @@ def format_summary(workplace: dict, months: list[dict]) -> str:
     """Who the workplace is and its latest month. This part stays put while the history is paged."""
     latest = months[-1]
     month_count = workplace["months_observed"]
-    lines = [
-        workplace["workplace_name"],
+    lines = [workplace["workplace_name"]]
+    # Earlier names of a workplace that renamed itself and was kept as one.
+    for former in workplace.get("former_names") or []:
+        lines.append(f"  formerly   {former['name']} (to {former['last_base_ym']:%Y-%m})")
+    lines += [
         f"  address    {workplace['road_address'] or '-'}",
         f"  industry   {workplace['industry_name'] or '-'}",
         f"  type       {WORKPLACE_TYPES.get(workplace['workplace_type_code'], 'unknown')}"

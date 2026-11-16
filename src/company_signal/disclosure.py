@@ -43,7 +43,7 @@ def company_from_answer(con: duckdb.DuckDBPyConnection, workplace_id: str, query
     con.execute("create or replace temp table answer_workplace as from mart.mart_workplace where workplace_id = ?", [workplace_id])
     cursor = con.execute(
         """
-        select t.workplace_id, c.*
+        select t.workplace_id, c.* replace (t.bzno as bzno)
         from fsc_ties('answer_workplace', 'answer_item') as t
         inner join fsc_corporations('answer_item') as c using (crno)
         """
