@@ -1,12 +1,15 @@
 # company-signal
 
-Look up a Korean workplace by name and see how its headcount, joiners, leavers and estimated pay have moved month by month.
+Monthly workforce indicators for Korean workplaces, built from Korean public data.
 
-The numbers come from the National Pension Service workplace data on the Korean public data portal. The tool shows indicators and their limits. It does not rate or rank workplaces.
+Look up a workplace by name and see how its headcount, joiners, leavers and estimated pay have moved month by month. The numbers come from the National Pension Service (국민연금공단) workplace data and the Financial Services Commission (금융위원회) company outlines on Korea's public data portal, data.go.kr. The tool shows indicators and their limits. It does not rate or rank workplaces.
+
+## Requirements
+
+- Python 3.11 or later
+- A free [data.go.kr](https://www.data.go.kr) API key for datasets [15083277](https://www.data.go.kr/data/15083277/fileData.do) (pension) and [15043184](https://www.data.go.kr/data/15043184/openapi.do) (company details)
 
 ## Quick start
-
-You need Python 3.11 or later and a free [data.go.kr](https://www.data.go.kr) API key for datasets [15083277](https://www.data.go.kr/data/15083277/fileData.do) (pension) and [15043184](https://www.data.go.kr/data/15043184/openapi.do) (company details).
 
 ```bash
 # 1. Install
