@@ -11,6 +11,7 @@ import duckdb
 
 from .api import Client, FetchError
 from .collect import collect
+from .compact import CompactRefused, compact
 from .config import KEY_ENV, Settings, load_settings
 from .disclosure import company_from_answer, company_loader, query_name_if_askable
 from .enrich import REFRESH_AFTER_DAYS, enrich
@@ -124,6 +125,27 @@ def cmd_status(args: argparse.Namespace) -> int:
         return 0  # a database made before company disclosures were collected
     if asked:
         print(f"company disclosures: {asked:,} names asked, {matched:,} with a match, {truncated:,} truncated")
+    return 0
+
+
+def cmd_compact(args: argparse.Namespace) -> int:
+    settings = load_settings(require_key=False)
+    if not settings.db_path.exists():
+        print("No data collected yet.")
+        return 0
+    try:
+        result = compact(settings.db_path)
+    except CompactRefused as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    except duckdb.IOException:
+        print("Another process is using the database. Run this when collection and builds have finished.", file=sys.stderr)
+        return 1
+    print(f"Checked {result.pages_checked:,} page files; all match what was recorded.")
+    for table, rows in result.tables_copied.items():
+        print(f"  {table}: {rows:,} rows")
+    print(f"{settings.db_path.name}: {result.size_before / 1e9:.1f} GB -> {result.size_after / 1e9:.2f} GB")
+    print(f"The old file is kept as {result.old_path.name}. Delete it once you are satisfied.")
     return 0
 
 
@@ -341,6 +363,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-calls", type=int, default=9000, help="disclosure API calls to spend (default 9000)")
     p.add_argument("--force-build", action="store_true", help="build even when no new publication was completed")
     p.set_defaults(func=cmd_update)
+
+    p = sub.add_parser("compact", help="shrink a database made before the page files became the only copy of the records")
+    p.set_defaults(func=cmd_compact)
 
     p = sub.add_parser("status", help="show collection progress")
     p.set_defaults(func=cmd_status)
